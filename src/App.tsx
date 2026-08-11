@@ -70,7 +70,7 @@ export default function App() {
   // Settings
   const [settings, setSettings] = useState<Settings>({
     aiEngine: "local",
-    chunkDurationSec: 1.2,
+    chunkDurationSec: 2.5,
     inputLanguage: "english",
     autoTranslate: false,
     targetLanguage: "Español",

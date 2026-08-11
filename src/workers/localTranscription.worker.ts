@@ -1,6 +1,6 @@
 import { pipeline } from "@huggingface/transformers";
 
-const MODEL_ID = "onnx-community/whisper-tiny";
+const MODEL_ID = "onnx-community/whisper-base";
 const TARGET_SAMPLE_RATE = 16_000;
 
 let transcriberPromise: Promise<any> | null = null;

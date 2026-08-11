@@ -70,8 +70,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onChange={(e) => onUpdateSettings({ chunkDurationSec: Number(e.target.value) })}
               className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
             >
-              <option value={1.2}>1.2 segundos (Ultra rápido / Tiempo real)</option>
-              <option value={2.5}>2.5 segundos (Equilibrado)</option>
+              <option value={1.2}>1.2 segundos (Solo para PCs potentes)</option>
+              <option value={2.5}>2.5 segundos (Rápido y fluido - Recomendado)</option>
               <option value={3}>3 segundos (Estable)</option>
               <option value={5}>5 segundos (Mayor contexto)</option>
             </select>
