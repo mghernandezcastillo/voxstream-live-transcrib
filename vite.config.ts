@@ -11,6 +11,13 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    optimizeDeps: {
+      // The package contains top-level await and a threaded Emscripten module.
+      // Vite's dev pre-bundler can invalidate its generated URL while a module
+      // worker is starting, leaving the worker with a 504 Outdated Optimize Dep.
+      // Serving the ESM package directly keeps dev and production equivalent.
+      exclude: ['@moonshine-ai/moonshine-wasm'],
+    },
     worker: {
       // Moonshine's official Emscripten module uses top-level await.
       format: 'es' as const,

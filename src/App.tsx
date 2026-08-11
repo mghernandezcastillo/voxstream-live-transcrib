@@ -649,8 +649,18 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
       worker.onerror = (event) => {
         if (generation !== moonshineWorkerGenerationRef.current) return;
-        console.error("[VoxStream Moonshine Worker]", event.message || event);
-        fallbackMoonshineToWhisper(event.message || "error no controlado del worker");
+        const location = event.filename
+          ? ` (${event.filename}${event.lineno ? `:${event.lineno}:${event.colno || 0}` : ""})`
+          : "";
+        const reason = `${event.message || "el worker no pudo arrancar"}${location}`;
+        console.error("[VoxStream Moonshine Worker]", reason, event.error || event);
+        fallbackMoonshineToWhisper(reason);
+      };
+
+      worker.onmessageerror = (event) => {
+        if (generation !== moonshineWorkerGenerationRef.current) return;
+        console.error("[VoxStream Moonshine Worker] Mensaje inválido", event);
+        fallbackMoonshineToWhisper("el navegador no pudo leer un mensaje del worker");
       };
 
       const logicalCores = Number(navigator.hardwareConcurrency) || 1;

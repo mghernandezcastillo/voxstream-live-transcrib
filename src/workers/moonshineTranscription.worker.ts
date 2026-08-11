@@ -1,18 +1,18 @@
-import {
-  ModelArch,
-  Transcriber,
-  type Stream,
-  type TranscriptEventListener,
-  type TranscriptLine,
+import type {
+  Transcriber as MoonshineTranscriber,
+  Stream,
+  TranscriptEventListener,
+  TranscriptLine,
 } from "@moonshine-ai/moonshine-wasm";
 
 type MoonshineLanguage = "english" | "spanish";
 
-let transcriber: Transcriber | null = null;
+let transcriber: MoonshineTranscriber | null = null;
 let stream: Stream | null = null;
 let loadedLanguage: MoonshineLanguage | null = null;
 let activeSessionId = 0;
 let commandChain = Promise.resolve();
+let moonshineModulePromise: Promise<typeof import("@moonshine-ai/moonshine-wasm")> | null = null;
 
 function post(type: string, data: Record<string, unknown> = {}) {
   self.postMessage({ type, engine: "moonshine", language: loadedLanguage, ...data });
@@ -42,6 +42,25 @@ function closeStream() {
     // The worker is about to replace or close this stream anyway.
   }
   stream = null;
+}
+
+async function getMoonshineModule() {
+  if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+    throw new Error(
+      "Moonshine requiere aislamiento del navegador (COOP/COEP). Reinicia el servidor y recarga la página.",
+    );
+  }
+
+  moonshineModulePromise ??= import("@moonshine-ai/moonshine-wasm");
+  try {
+    return await moonshineModulePromise;
+  } catch (error) {
+    moonshineModulePromise = null;
+    throw new Error(
+      `No se pudo cargar el módulo Moonshine: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 function startSession(sessionId: number) {
@@ -80,6 +99,8 @@ async function load(language: MoonshineLanguage, preferredEnglishModel?: "small"
   transcriber = null;
   loadedLanguage = language;
 
+  const { ModelArch, Transcriber } = await getMoonshineModule();
+
   const logicalCores = Number(navigator.hardwareConcurrency) || 1;
   const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
   const prefersTiny = language === "english" && (
@@ -93,7 +114,7 @@ async function load(language: MoonshineLanguage, preferredEnglishModel?: "small"
     ? prefersTiny ? "tiny-streaming" : "small-streaming"
     : "base";
 
-  const loadModel = (arch: ModelArch) => Transcriber.load({
+  const loadModel = (arch: Parameters<typeof Transcriber.load>[0]["modelArch"]) => Transcriber.load({
     language: language === "english" ? "en" : "es",
     modelArch: arch,
     onProgress: (loaded, total, file) => {
