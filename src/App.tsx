@@ -10,11 +10,16 @@ import {
 import { formatTimestamp, blobToBase64, getSupportedAudioMimeType } from "./utils/audioUtils";
 import {
   measureAudioLevel,
+  getQueueDurationSec,
   shouldSwitchWebGPUToWasm,
   takeCoalescedChunk,
   trimAudioQueue,
   type LocalAudioChunk,
 } from "./utils/localAudioQueue";
+import {
+  detectEnglishOrSpanish,
+  type OptimizedLanguage,
+} from "./utils/languageDetection";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { TabShareGuideModal } from "./components/TabShareGuideModal";
 import { LiveTranscriptStream } from "./components/LiveTranscriptStream";
@@ -42,11 +47,14 @@ import {
 } from "lucide-react";
 
 type LocalEngineStatus = "idle" | "loading" | "ready" | "error";
+type RuntimeEngine = Settings["aiEngine"];
 
 const MAX_INFERENCE_AUDIO_SEC = 15;
 const MAX_BUFFERED_AUDIO_SEC = 90;
 const WEBGPU_INFERENCE_TIMEOUT_MS = 45_000;
 const WASM_INFERENCE_TIMEOUT_MS = 120_000;
+const MOONSHINE_CHUNK_DURATION_SEC = 0.5;
+const AUTO_LANGUAGE_PROBE_SEC = 3;
 
 export default function App() {
   // State
@@ -65,6 +73,8 @@ export default function App() {
   const [hasLocalEngineLoadedOnce, setHasLocalEngineLoadedOnce] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatus, setDownloadStatus] = useState("");
+  const [runtimeEngine, setRuntimeEngine] = useState<RuntimeEngine>("moonshine");
+  const [detectedLanguage, setDetectedLanguage] = useState<OptimizedLanguage | null>(null);
 
   // Modals
   const [showGuideModal, setShowGuideModal] = useState(false);
@@ -75,9 +85,9 @@ export default function App() {
 
   // Settings
   const [settings, setSettings] = useState<Settings>({
-    aiEngine: "local",
+    aiEngine: "moonshine",
     chunkDurationSec: 2.0,
-    inputLanguage: "english",
+    inputLanguage: "auto",
     autoTranslate: false,
     targetLanguage: "Español",
     autoScroll: true,
@@ -113,6 +123,21 @@ export default function App() {
   );
   const localAudioQueueRef = useRef<LocalAudioChunk[]>([]);
 
+  const moonshineWorkerRef = useRef<Worker | null>(null);
+  const moonshineWorkerReadyRef = useRef(false);
+  const moonshineSessionReadyRef = useRef(false);
+  const moonshineSessionStartingRef = useRef(false);
+  const moonshineWorkerBusyRef = useRef(false);
+  const moonshineWorkerGenerationRef = useRef(0);
+  const moonshineWorkerLanguageRef = useRef<OptimizedLanguage | null>(null);
+  const moonshineAudioQueueRef = useRef<LocalAudioChunk[]>([]);
+  const moonshineActiveChunkRef = useRef<LocalAudioChunk | null>(null);
+  const moonshineFinalLineIdsRef = useRef(new Set<string>());
+  const autoLanguageProbeRunningRef = useRef(false);
+  const detectedLanguageRef = useRef<OptimizedLanguage | null>(null);
+  const activeRuntimeEngineRef = useRef<RuntimeEngine>("moonshine");
+  const activeInputLanguageRef = useRef<Settings["inputLanguage"]>("auto");
+
   const localActiveChunkRef = useRef<LocalAudioChunk | null>(null);
   const localSessionIdRef = useRef(0);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
@@ -136,6 +161,8 @@ export default function App() {
       stopTranscription();
       localWorkerRef.current?.terminate();
       localWorkerRef.current = null;
+      moonshineWorkerRef.current?.terminate();
+      moonshineWorkerRef.current = null;
     };
   }, []);
 
@@ -295,6 +322,32 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+  const requestSegmentTranslation = (segmentId: string, text: string) => {
+    const activeSettings = settingsRef.current;
+    if (!activeSettings.autoTranslate) return;
+
+    void fetch("/api/translate-transcript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        targetLanguage: activeSettings.targetLanguage,
+      }),
+    })
+      .then((response) => response.json())
+      .then((translation) => {
+        if (!translation.translatedText) return;
+        setSegments((currentSegments) =>
+          currentSegments.map((segment) =>
+            segment.id === segmentId
+              ? { ...segment, translatedText: translation.translatedText }
+              : segment,
+          ),
+        );
+      })
+      .catch((error) => console.error("Translation error:", error));
+  };
+
   const appendTranscriptSegment = (
     text: string,
     language?: string,
@@ -305,11 +358,11 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     setErrorMessage(null);
 
     const currentMs = Date.now() - startTimeRef.current;
+    const segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     
     setSegments((previousSegments) => {
       // Publish every completed Whisper chunk immediately. Merging unfinished
       // phrases here made new visible lines appear only every ~15 seconds.
-      const segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const newSegments = [...previousSegments];
       newSegments.push({
         id: segmentId,
@@ -320,32 +373,407 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         language: language || undefined,
       });
 
-      const activeSettings = settingsRef.current;
-      if (activeSettings.autoTranslate) {
-        void fetch("/api/translate-transcript", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: cleanText,
-            targetLanguage: activeSettings.targetLanguage,
-          }),
-        })
-          .then((response) => response.json())
-          .then((translation) => {
-            if (!translation.translatedText) return;
-            setSegments((currentSegments) =>
-              currentSegments.map((segment) =>
-                segment.id === segmentId
-                  ? { ...segment, translatedText: translation.translatedText }
-                  : segment
-              )
-            );
-          })
-          .catch((error) => console.error("Translation error:", error));
-      }
-
       return newSegments;
     });
+
+    requestSegmentTranslation(segmentId, cleanText);
+  };
+
+  const upsertMoonshineSegment = (
+    line: {
+      id: string;
+      text: string;
+      startTime: number;
+      latencyMs?: number;
+    },
+    language: OptimizedLanguage,
+    isFinal: boolean,
+  ) => {
+    const cleanText = String(line.text || "").replace(/\s+/g, " ").trim();
+    if (!cleanText) return;
+
+    const segmentId = `moonshine_${localSessionIdRef.current}_${line.id}`;
+    const rawTimestampMs = Math.max(0, Math.round(Number(line.startTime || 0) * 1000));
+    setErrorMessage(null);
+    setSegments((previousSegments) => {
+      const existingIndex = previousSegments.findIndex((segment) => segment.id === segmentId);
+      const nextSegment: TranscriptSegment = {
+        id: segmentId,
+        timestamp: formatTimestamp(rawTimestampMs),
+        rawTimestampMs,
+        text: cleanText,
+        language: language === "spanish" ? "Español" : "English",
+        isPartial: !isFinal,
+      };
+
+      if (existingIndex < 0) return [...previousSegments, nextSegment];
+
+      const updated = [...previousSegments];
+      updated[existingIndex] = {
+        ...updated[existingIndex],
+        ...nextSegment,
+      };
+      return updated;
+    });
+
+    if (Number(line.latencyMs) > 0) setLastInferenceLatencyMs(Number(line.latencyMs));
+    if (isFinal && !moonshineFinalLineIdsRef.current.has(segmentId)) {
+      moonshineFinalLineIdsRef.current.add(segmentId);
+      requestSegmentTranslation(segmentId, cleanText);
+    }
+  };
+
+  const disposeWhisperWorker = () => {
+    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
+    localWorkerTimeoutRef.current = null;
+    localWorkerGenerationRef.current += 1;
+    localWorkerRef.current?.terminate();
+    localWorkerRef.current = null;
+    localWorkerReadyRef.current = false;
+    localWorkerBusyRef.current = false;
+    localWorkerBackendRef.current = null;
+    localActiveChunkRef.current = null;
+    downloadProgressCache.current = {};
+  };
+
+  const disposeMoonshineWorker = () => {
+    moonshineWorkerGenerationRef.current += 1;
+    moonshineWorkerRef.current?.terminate();
+    moonshineWorkerRef.current = null;
+    moonshineWorkerReadyRef.current = false;
+    moonshineSessionReadyRef.current = false;
+    moonshineSessionStartingRef.current = false;
+    moonshineWorkerBusyRef.current = false;
+    moonshineWorkerLanguageRef.current = null;
+    moonshineActiveChunkRef.current = null;
+  };
+
+  const drainMoonshineAudioQueue = () => {
+    if (
+      !isRecordingRef.current ||
+      activeRuntimeEngineRef.current !== "moonshine" ||
+      !moonshineWorkerRef.current ||
+      !moonshineWorkerReadyRef.current ||
+      !moonshineSessionReadyRef.current ||
+      moonshineWorkerBusyRef.current
+    ) {
+      return;
+    }
+
+    moonshineAudioQueueRef.current = moonshineAudioQueueRef.current.filter(
+      (chunk) => chunk.sessionId === localSessionIdRef.current,
+    );
+    const nextChunk = moonshineAudioQueueRef.current.shift();
+    if (!nextChunk) {
+      setIsProcessingChunk(false);
+      return;
+    }
+
+    moonshineWorkerBusyRef.current = true;
+    moonshineActiveChunkRef.current = nextChunk;
+    setIsProcessingChunk(true);
+    moonshineWorkerRef.current.postMessage({
+      type: "audio",
+      id: nextChunk.id,
+      sessionId: nextChunk.sessionId,
+      audio: nextChunk.audio,
+      sampleRate: nextChunk.sampleRate,
+    });
+  };
+
+  const startMoonshineSessionIfReady = () => {
+    if (
+      !isRecordingRef.current ||
+      !moonshineWorkerRef.current ||
+      !moonshineWorkerReadyRef.current ||
+      moonshineSessionReadyRef.current ||
+      moonshineSessionStartingRef.current
+    ) {
+      return;
+    }
+
+    moonshineSessionStartingRef.current = true;
+    moonshineWorkerRef.current.postMessage({
+      type: "start",
+      sessionId: localSessionIdRef.current,
+    });
+  };
+
+  const fallbackMoonshineToWhisper = (reason: string) => {
+    if (activeRuntimeEngineRef.current !== "moonshine") return;
+
+    const recoverableChunks = [
+      ...(moonshineActiveChunkRef.current ? [moonshineActiveChunkRef.current] : []),
+      ...moonshineAudioQueueRef.current,
+    ].filter((chunk) => chunk.sessionId === localSessionIdRef.current);
+
+    moonshineWorkerGenerationRef.current += 1;
+    moonshineWorkerRef.current?.terminate();
+    moonshineWorkerRef.current = null;
+    moonshineWorkerReadyRef.current = false;
+    moonshineSessionReadyRef.current = false;
+    moonshineSessionStartingRef.current = false;
+    moonshineWorkerBusyRef.current = false;
+    moonshineActiveChunkRef.current = null;
+    moonshineAudioQueueRef.current = [];
+
+    if (!isRecordingRef.current) {
+      setLocalEngineStatus("error");
+      setErrorMessage(`⚠️ Moonshine no pudo inicializarse: ${reason}`);
+      return;
+    }
+
+    activeRuntimeEngineRef.current = "local";
+    setRuntimeEngine("local");
+    localAudioQueueRef.current.push(...recoverableChunks);
+    setErrorMessage(
+      `⚠️ Moonshine no pudo continuar (${reason}). VoxStream cambió esta sesión a Whisper local sin usar Gemini.`,
+    );
+    setLocalEngineStatus(localWorkerReadyRef.current ? "ready" : "loading");
+    ensureLocalTranscriptionWorker();
+    drainLocalAudioQueue();
+  };
+
+  const ensureMoonshineWorker = (language: OptimizedLanguage) => {
+    if (!isMountedRef.current) return;
+
+    if (
+      moonshineWorkerRef.current &&
+      moonshineWorkerLanguageRef.current === language
+    ) {
+      if (moonshineWorkerReadyRef.current) {
+        setLocalEngineStatus("ready");
+        setLocalEngineBackend("wasm");
+        startMoonshineSessionIfReady();
+      }
+      return;
+    }
+
+    moonshineWorkerGenerationRef.current += 1;
+    moonshineWorkerRef.current?.terminate();
+    moonshineWorkerRef.current = null;
+    moonshineWorkerReadyRef.current = false;
+    moonshineSessionReadyRef.current = false;
+    moonshineSessionStartingRef.current = false;
+    moonshineWorkerBusyRef.current = false;
+    moonshineWorkerLanguageRef.current = language;
+    setLocalEngineStatus("loading");
+    setLocalEngineBackend("wasm");
+    setDownloadProgress(0);
+    setDownloadStatus(
+      `Cargando Moonshine ${language === "spanish" ? "Español" : "English"}...`,
+    );
+
+    try {
+      const worker = new Worker(
+        new URL("./workers/moonshineTranscription.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+      moonshineWorkerRef.current = worker;
+      const generation = moonshineWorkerGenerationRef.current;
+
+      worker.onmessage = ({ data }) => {
+        if (generation !== moonshineWorkerGenerationRef.current) return;
+
+        if (data?.type === "progress") {
+          const loaded = Number(data.loaded || 0);
+          const total = Number(data.total || 0);
+          const file = String(data.file || "modelo");
+          if (total > 0) setDownloadProgress(Math.min(99, Math.round((loaded / total) * 100)));
+          setDownloadStatus(`Descargando Moonshine: ${file}`);
+          return;
+        }
+
+        if (data?.type === "model-fallback") {
+          setDownloadProgress(0);
+          setDownloadStatus("El modelo inglés Small no fue compatible; cargando Tiny Streaming...");
+          console.warn("[VoxStream Moonshine] Cambio a Tiny Streaming:", data.message);
+          return;
+        }
+
+        if (data?.type === "ready") {
+          moonshineWorkerReadyRef.current = true;
+          setLocalEngineStatus("ready");
+          setLocalEngineBackend("wasm");
+          setHasLocalEngineLoadedOnce(true);
+          setDownloadProgress(100);
+          setDownloadStatus("Moonshine preparado");
+          console.log(
+            `[VoxStream] Moonshine ${String(data.language)} listo (${String(data.model)}).`,
+          );
+          startMoonshineSessionIfReady();
+          return;
+        }
+
+        if (data?.type === "session-ready") {
+          if (Number(data.sessionId) !== localSessionIdRef.current) return;
+          moonshineSessionStartingRef.current = false;
+          moonshineSessionReadyRef.current = true;
+          drainMoonshineAudioQueue();
+          return;
+        }
+
+        if (data?.type === "partial" || data?.type === "final") {
+          if (Number(data.sessionId) !== localSessionIdRef.current) return;
+          upsertMoonshineSegment(
+            data.line,
+            (data.language || moonshineWorkerLanguageRef.current) as OptimizedLanguage,
+            data.type === "final",
+          );
+          return;
+        }
+
+        if (data?.type === "audio-processed") {
+          if (Number(data.sessionId) !== localSessionIdRef.current) return;
+          const activeChunk = moonshineActiveChunkRef.current;
+          if (activeChunk?.id !== data.id) return;
+          moonshineActiveChunkRef.current = null;
+          moonshineWorkerBusyRef.current = false;
+          const processingMs = Number(data.processingMs || 0);
+          const audioDurationSec = Number(data.audioDurationSec || 0);
+          if (processingMs > 0) {
+            setLastInferenceLatencyMs(processingMs);
+            console.log(
+              `[VoxStream Latency] moonshine-${String(data.language)}: ${(processingMs / 1000).toFixed(2)} s para ${audioDurationSec.toFixed(2)} s de audio.`,
+            );
+          }
+          drainMoonshineAudioQueue();
+          return;
+        }
+
+        if (data?.type === "error") {
+          console.error("[VoxStream Moonshine]", data.message || "Error desconocido");
+          fallbackMoonshineToWhisper(data.message || "error del motor");
+        }
+      };
+
+      worker.onerror = (event) => {
+        if (generation !== moonshineWorkerGenerationRef.current) return;
+        console.error("[VoxStream Moonshine Worker]", event.message || event);
+        fallbackMoonshineToWhisper(event.message || "error no controlado del worker");
+      };
+
+      const logicalCores = Number(navigator.hardwareConcurrency) || 1;
+      const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
+      const englishModel = logicalCores <= 4 || (deviceMemory > 0 && deviceMemory <= 4)
+        ? "tiny"
+        : "small";
+      worker.postMessage({ type: "load", language, englishModel });
+    } catch (error) {
+      fallbackMoonshineToWhisper(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const maybeStartAutoLanguageDetection = () => {
+    if (
+      !isRecordingRef.current ||
+      activeRuntimeEngineRef.current !== "moonshine" ||
+      activeInputLanguageRef.current !== "auto" ||
+      detectedLanguageRef.current ||
+      autoLanguageProbeRunningRef.current ||
+      !localWorkerReadyRef.current ||
+      !localWorkerRef.current ||
+      getQueueDurationSec(moonshineAudioQueueRef.current) < AUTO_LANGUAGE_PROBE_SEC
+    ) {
+      return;
+    }
+
+    const sourceChunks: LocalAudioChunk[] = [];
+    let sampleCount = 0;
+    const sampleRate = moonshineAudioQueueRef.current[0]?.sampleRate || 16_000;
+    for (const chunk of moonshineAudioQueueRef.current) {
+      if (chunk.sessionId !== localSessionIdRef.current || chunk.sampleRate !== sampleRate) continue;
+      sourceChunks.push(chunk);
+      sampleCount += chunk.audio.length;
+      if (sampleCount / sampleRate >= AUTO_LANGUAGE_PROBE_SEC) break;
+    }
+    if (sampleCount === 0) return;
+
+    const probeAudio = new Float32Array(sampleCount);
+    let offset = 0;
+    for (const chunk of sourceChunks) {
+      probeAudio.set(chunk.audio, offset);
+      offset += chunk.audio.length;
+    }
+
+    autoLanguageProbeRunningRef.current = true;
+    setLocalEngineStatus("loading");
+    setDownloadStatus("Detectando español o inglés con Whisper...");
+    const id = `language_probe_${Date.now()}`;
+    const timeout = window.setTimeout(() => {
+      const resolver = localWorkerTestResolversRef.current.get(id);
+      localWorkerTestResolversRef.current.delete(id);
+      resolver?.reject(new Error("la detección de idioma excedió el tiempo límite"));
+    }, WASM_INFERENCE_TIMEOUT_MS);
+
+    new Promise<any>((resolve, reject) => {
+      localWorkerTestResolversRef.current.set(id, { resolve, reject });
+      localWorkerRef.current!.postMessage({
+        type: "transcribe",
+        id,
+        audio: probeAudio,
+        sampleRate,
+        language: "auto",
+        backendPreference: localWorkerForceWasmRef.current ? "wasm" : "auto",
+      });
+    })
+      .then((result) => {
+        const browserFallback: OptimizedLanguage = navigator.language.toLowerCase().startsWith("en")
+          ? "english"
+          : "spanish";
+        const detection = detectEnglishOrSpanish(String(result?.text || ""), browserFallback);
+        detectedLanguageRef.current = detection.language;
+        setDetectedLanguage(detection.language);
+        setDownloadStatus(
+          `Idioma detectado: ${detection.language === "spanish" ? "Español" : "English"}. Cargando Moonshine...`,
+        );
+        console.log(
+          `[VoxStream Auto] Idioma ${detection.language}; confianza heurística ${(detection.confidence * 100).toFixed(0)}%.`,
+        );
+        // Keeping both model families resident doubles memory use and hurts the
+        // exact low-end PCs this mode is meant to support. The browser cache is
+        // preserved, so Whisper can still be restored if Moonshine fails.
+        disposeWhisperWorker();
+        ensureMoonshineWorker(detection.language);
+      })
+      .catch((error) => {
+        const fallbackLanguage: OptimizedLanguage = navigator.language.toLowerCase().startsWith("en")
+          ? "english"
+          : "spanish";
+        detectedLanguageRef.current = fallbackLanguage;
+        setDetectedLanguage(fallbackLanguage);
+        setErrorMessage(
+          `⚠️ No se pudo detectar el idioma automáticamente (${error instanceof Error ? error.message : String(error)}). Se usará ${fallbackLanguage === "spanish" ? "Español" : "English"} según el navegador.`,
+        );
+        ensureMoonshineWorker(fallbackLanguage);
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        autoLanguageProbeRunningRef.current = false;
+      });
+  };
+
+  const enqueueMoonshineAudioChunk = (chunk: LocalAudioChunk) => {
+    moonshineAudioQueueRef.current.push(chunk);
+    const trimmed = trimAudioQueue(moonshineAudioQueueRef.current, MAX_BUFFERED_AUDIO_SEC);
+    if (trimmed.droppedChunks > 0 && !queueOverflowWarnedRef.current) {
+      queueOverflowWarnedRef.current = true;
+      setErrorMessage(
+        `⚠️ Este equipo acumuló más de ${MAX_BUFFERED_AUDIO_SEC} s de audio. Se descartaron ${Math.round(trimmed.droppedDurationSec)} s antiguos para proteger la memoria.`,
+      );
+    }
+
+    if (activeInputLanguageRef.current === "auto" && !detectedLanguageRef.current) {
+      ensureLocalTranscriptionWorker();
+      maybeStartAutoLanguageDetection();
+      return;
+    }
+
+    const language = detectedLanguageRef.current || activeInputLanguageRef.current;
+    if (language === "english" || language === "spanish") {
+      ensureMoonshineWorker(language);
+      drainMoonshineAudioQueue();
+    }
   };
 
   const restartLocalTranscriptionWorker = (reason: string, preferWasm = false) => {
@@ -372,6 +800,23 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     localWorkerConsecutiveErrorsRef.current += 1;
     if (localWorkerConsecutiveErrorsRef.current >= 3) {
       localWorkerFailedRef.current = true;
+      if (
+        activeRuntimeEngineRef.current === "moonshine" &&
+        activeInputLanguageRef.current === "auto" &&
+        !detectedLanguageRef.current
+      ) {
+        const fallbackLanguage: OptimizedLanguage = navigator.language.toLowerCase().startsWith("en")
+          ? "english"
+          : "spanish";
+        detectedLanguageRef.current = fallbackLanguage;
+        setDetectedLanguage(fallbackLanguage);
+        setErrorMessage(
+          `⚠️ Whisper no pudo detectar el idioma. Se usará ${fallbackLanguage === "spanish" ? "Español" : "English"} según el navegador.`,
+        );
+        setLocalEngineStatus("loading");
+        ensureMoonshineWorker(fallbackLanguage);
+        return;
+      }
       setLocalEngineStatus("error");
       setErrorMessage(
         "⚠️ Whisper local no pudo recuperarse. Detén y vuelve a iniciar la captura; Gemini solo se usará si lo eliges manualmente en Configuración.",
@@ -481,7 +926,14 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
 
     if (localWorkerRef.current) {
-      if (localWorkerReadyRef.current) drainLocalAudioQueue();
+      if (localWorkerReadyRef.current) {
+        if (activeRuntimeEngineRef.current === "local" || settingsRef.current.aiEngine === "local") {
+          setLocalEngineStatus("ready");
+          setLocalEngineBackend(localWorkerBackendRef.current);
+        }
+        drainLocalAudioQueue();
+        maybeStartAutoLanguageDetection();
+      }
       return;
     }
 
@@ -603,6 +1055,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             });
           }
           drainLocalAudioQueue();
+          maybeStartAutoLanguageDetection();
           return;
         }
 
@@ -698,8 +1151,30 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   };
 
   useEffect(() => {
-    ensureLocalTranscriptionWorker();
-  }, []);
+    if (settings.aiEngine === "local") {
+      disposeMoonshineWorker();
+      ensureLocalTranscriptionWorker();
+      return;
+    }
+
+    if (settings.aiEngine === "moonshine" && settings.inputLanguage === "auto") {
+      disposeMoonshineWorker();
+      ensureLocalTranscriptionWorker();
+      return;
+    }
+
+    if (settings.aiEngine === "moonshine") {
+      disposeWhisperWorker();
+      ensureMoonshineWorker(settings.inputLanguage);
+      return;
+    }
+
+    disposeWhisperWorker();
+    disposeMoonshineWorker();
+    setLocalEngineStatus("idle");
+    setLocalEngineBackend(null);
+    setDownloadStatus("");
+  }, [settings.aiEngine, settings.inputLanguage]);
 
   const enqueueLocalAudioChunk = (audio: Float32Array, sampleRate: number) => {
     const chunk: LocalAudioChunk = {
@@ -710,8 +1185,13 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       sessionId: localSessionIdRef.current,
     };
 
-    if (settingsRef.current.aiEngine === "cloud") {
+    if (activeRuntimeEngineRef.current === "cloud") {
       enqueueAudioChunk(encodeWAV(chunk.audio, chunk.sampleRate), "audio/wav");
+      return;
+    }
+
+    if (activeRuntimeEngineRef.current === "moonshine") {
+      enqueueMoonshineAudioChunk(chunk);
       return;
     }
 
@@ -755,7 +1235,25 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         audioContextRef.current = null;
       }
 
-      if (settingsRef.current.aiEngine === "local" && localWorkerFailedRef.current) {
+      const selectedEngine = settingsRef.current.aiEngine;
+      const selectedLanguage = settingsRef.current.inputLanguage;
+      activeRuntimeEngineRef.current = selectedEngine;
+      activeInputLanguageRef.current = selectedLanguage;
+      setRuntimeEngine(selectedEngine);
+      detectedLanguageRef.current = selectedLanguage === "auto" ? null : selectedLanguage;
+      setDetectedLanguage(selectedLanguage === "auto" ? null : selectedLanguage);
+      moonshineFinalLineIdsRef.current.clear();
+      moonshineAudioQueueRef.current = [];
+      moonshineActiveChunkRef.current = null;
+      moonshineWorkerBusyRef.current = false;
+      moonshineSessionReadyRef.current = false;
+      moonshineSessionStartingRef.current = false;
+      autoLanguageProbeRunningRef.current = false;
+
+      if (
+        (selectedEngine === "local" || (selectedEngine === "moonshine" && selectedLanguage === "auto")) &&
+        localWorkerFailedRef.current
+      ) {
         localWorkerFailedRef.current = false;
         localWorkerConsecutiveErrorsRef.current = 0;
         localWorkerForceWasmRef.current = true;
@@ -768,9 +1266,17 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       setLastInferenceLatencyMs(null);
       startTimeRef.current = Date.now();
       setTranscriptionState("recording");
-      ensureLocalTranscriptionWorker();
+      if (selectedEngine === "local") {
+        ensureLocalTranscriptionWorker();
+      } else if (selectedEngine === "moonshine" && selectedLanguage === "auto") {
+        ensureLocalTranscriptionWorker();
+        setLocalEngineStatus("loading");
+        setDownloadStatus("Esperando audio para detectar español o inglés...");
+      } else if (selectedEngine === "moonshine") {
+        ensureMoonshineWorker(selectedLanguage);
+      }
       console.log(
-        `[VoxStream] Captura de ${captureSource === "mic" ? "micrófono" : "pestaña"} iniciada con ${settingsRef.current.aiEngine === "local" ? "Whisper local" : "Gemini elegido por el usuario"}.`,
+        `[VoxStream] Captura de ${captureSource === "mic" ? "micrófono" : "pestaña"} iniciada con ${selectedEngine === "moonshine" ? "Moonshine" : selectedEngine === "local" ? "Whisper local" : "Gemini elegido por el usuario"}.`,
       );
 
       let pcmBuffers: Float32Array[] = [];
@@ -814,13 +1320,16 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
         try {
           if (!ctx.audioWorklet) throw new Error("AudioWorklet no disponible");
-          await ctx.audioWorklet.addModule("/pcm-capture-worklet.js?v=2");
+          await ctx.audioWorklet.addModule("/pcm-capture-worklet.js?v=3");
+          const captureChunkDuration = activeRuntimeEngineRef.current === "moonshine"
+            ? MOONSHINE_CHUNK_DURATION_SEC
+            : settingsRef.current.chunkDurationSec;
           const worklet = new AudioWorkletNode(ctx, "voxstream-pcm-capture", {
             numberOfInputs: 1,
             numberOfOutputs: 1,
             outputChannelCount: [1],
             processorOptions: {
-              chunkDurationSec: settingsRef.current.chunkDurationSec,
+              chunkDurationSec: captureChunkDuration,
             },
           });
           worklet.port.onmessage = ({ data }) => {
@@ -848,7 +1357,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         silentGain.connect(ctx.destination);
 
         if (!usingAudioWorklet) {
-          const intervalMs = settingsRef.current.chunkDurationSec * 1000;
+          const intervalMs = (activeRuntimeEngineRef.current === "moonshine"
+            ? MOONSHINE_CHUNK_DURATION_SEC
+            : settingsRef.current.chunkDurationSec) * 1000;
           chunkIntervalRef.current = window.setInterval(() => {
             if (!isRecordingRef.current || pcmBuffers.length === 0) return;
             const currentBuffers = pcmBuffers;
@@ -875,14 +1386,14 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         audioProcessorRef.current = null;
         silentGainRef.current = null;
 
-        if (settingsRef.current.aiEngine !== "cloud") {
+        if (activeRuntimeEngineRef.current !== "cloud") {
           isRecordingRef.current = false;
           mediaStream.getTracks().forEach((track) => track.stop());
           streamRef.current = null;
           setStream(null);
           setTranscriptionState("idle");
           setErrorMessage(
-            "⚠️ Este navegador no pudo abrir Web Audio para Whisper local. Prueba la versión actual de Chrome o Edge y vuelve a compartir la pestaña con audio.",
+            "⚠️ Este navegador no pudo abrir Web Audio para la transcripción local. Prueba la versión actual de Chrome o Edge y vuelve a compartir la pestaña con audio.",
           );
           return;
         }
@@ -1016,14 +1527,30 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         void audioContextRef.current.resume();
       }
       setTranscriptionState("recording");
-      drainLocalAudioQueue();
+      if (activeRuntimeEngineRef.current === "moonshine") {
+        drainMoonshineAudioQueue();
+      } else {
+        drainLocalAudioQueue();
+      }
     }
   };
 
   // Stop Transcription
   const stopTranscription = () => {
+    const endingSessionId = localSessionIdRef.current;
+    if (moonshineWorkerRef.current && moonshineSessionReadyRef.current) {
+      moonshineWorkerRef.current.postMessage({
+        type: "stop",
+        sessionId: endingSessionId,
+      });
+    }
     isRecordingRef.current = false;
-    localSessionIdRef.current += 1;
+    // Moonshine's stop command flushes and completes the trailing phrase. Keep
+    // this session id valid until the next capture starts so that final line is
+    // not discarded merely because the user pressed Stop.
+    if (activeRuntimeEngineRef.current !== "moonshine") {
+      localSessionIdRef.current += 1;
+    }
 
     if (chunkIntervalRef.current) clearInterval(chunkIntervalRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
@@ -1031,6 +1558,12 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     timerRef.current = null;
     audioChunkQueueRef.current = [];
     localAudioQueueRef.current = [];
+    moonshineAudioQueueRef.current = [];
+    moonshineActiveChunkRef.current = null;
+    moonshineWorkerBusyRef.current = false;
+    moonshineSessionReadyRef.current = false;
+    moonshineSessionStartingRef.current = false;
+    autoLanguageProbeRunningRef.current = false;
     queueOverflowWarnedRef.current = false;
     if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
     localWorkerTimeoutRef.current = null;
@@ -1236,7 +1769,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
                 </motion.div>
                 
                 <p className="text-xs text-slate-400 mt-4 leading-relaxed px-4">
-                  VoxStream descarga Whisper una sola vez y procesa el audio localmente mediante WebGPU o WASM.
+                  VoxStream descarga el motor local una sola vez y conserva los modelos en la caché del navegador.
                 </p>
               </div>
             </div>
@@ -1265,7 +1798,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               </span>
             </h1>
             <p className="text-xs text-slate-400 hidden sm:block">
-              Transcripción local con Whisper y análisis opcional con Gemini
+              Moonshine en tiempo real, Whisper como respaldo y Gemini opcional
             </p>
           </div>
         </div>
@@ -1276,22 +1809,25 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           <div className="hidden md:flex items-center bg-white/5 border border-white/10 rounded-xl px-1 py-1 mr-2 backdrop-blur-md">
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'english' }))}
-              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${settings.inputLanguage === 'english' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              disabled={transcriptionState !== "idle"}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all disabled:opacity-40 ${settings.inputLanguage === 'english' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
               title="Inglés Fijo (Optimizado)"
             >
               EN
             </button>
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'spanish' }))}
-              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${settings.inputLanguage === 'spanish' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              disabled={transcriptionState !== "idle"}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all disabled:opacity-40 ${settings.inputLanguage === 'spanish' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
               title="Español Fijo (Optimizado)"
             >
               ES
             </button>
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'auto' }))}
-              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${settings.inputLanguage === 'auto' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
-              title="Automático (Lento)"
+              disabled={transcriptionState !== "idle"}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 disabled:opacity-40 ${settings.inputLanguage === 'auto' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              title="Automático español/inglés"
             >
               <Languages size={12} className={settings.inputLanguage === 'auto' ? 'text-slate-950' : 'text-cyan-400'} />
               <span>Auto</span>
@@ -1456,6 +1992,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
             <div
               data-local-engine-status={localEngineStatus}
+              data-transcription-engine={runtimeEngine}
               data-local-engine-backend={localEngineBackend || ""}
               data-last-inference-ms={lastInferenceLatencyMs || ""}
               title={lastInferenceLatencyMs ? `Última inferencia: ${(lastInferenceLatencyMs / 1000).toFixed(1)} segundos` : undefined}
@@ -1472,14 +2009,20 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               />
               <span className="capitalize font-sans font-semibold text-slate-200">
                 {transcriptionState === "recording"
-                  ? settings.aiEngine === "cloud"
+                  ? runtimeEngine === "cloud"
                     ? "Gemini Cloud (manual)"
                     : localEngineStatus === "loading"
-                      ? "Cargando Whisper..."
+                      ? runtimeEngine === "moonshine" && activeInputLanguageRef.current === "auto" && !detectedLanguage
+                        ? "Detectando idioma..."
+                        : runtimeEngine === "moonshine"
+                          ? "Cargando Moonshine..."
+                          : "Cargando Whisper..."
                       : localEngineStatus === "ready"
-                        ? `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}${lastInferenceLatencyMs ? ` · ${(lastInferenceLatencyMs / 1000).toFixed(1)} s` : ""}`
+                        ? runtimeEngine === "moonshine"
+                          ? `Moonshine ${detectedLanguage === "spanish" || activeInputLanguageRef.current === "spanish" ? "ES" : "EN"}${lastInferenceLatencyMs ? ` · ${lastInferenceLatencyMs < 1000 ? `${Math.round(lastInferenceLatencyMs)} ms` : `${(lastInferenceLatencyMs / 1000).toFixed(1)} s`}` : ""}`
+                          : `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}${lastInferenceLatencyMs ? ` · ${(lastInferenceLatencyMs / 1000).toFixed(1)} s` : ""}`
                         : localEngineStatus === "error"
-                          ? "Whisper requiere reinicio"
+                          ? `${runtimeEngine === "moonshine" ? "Moonshine" : "Whisper"} requiere reinicio`
                           : "Capturando..."
                   : transcriptionState === "paused"
                   ? "En Pausa"
@@ -1579,6 +2122,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         isOpen={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
         settings={settings}
+        isTranscribing={transcriptionState === "recording" || transcriptionState === "paused"}
         onUpdateSettings={(newSet) => setSettings((prev) => ({ ...prev, ...newSet }))}
       />
 

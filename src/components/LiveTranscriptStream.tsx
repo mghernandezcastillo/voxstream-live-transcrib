@@ -201,6 +201,8 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
                 className={`group relative p-4 rounded-xl transition-all duration-200 border ${
                   seg.isEditing
                     ? "bg-slate-900 border-cyan-400 shadow-lg"
+                    : seg.isPartial
+                    ? "bg-cyan-400/5 border-cyan-400/40 border-l-4 border-l-cyan-400 shadow-lg"
                     : isLatest
                     ? "bg-cyan-400/5 border-cyan-400/30 border-l-4 border-l-cyan-400 shadow-lg"
                     : "bg-white/5 hover:bg-white/10 border-white/10 backdrop-blur-md"
@@ -224,6 +226,11 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
                     {seg.language && (
                       <span className="text-[10px] text-cyan-400/80 uppercase tracking-wider font-semibold">
                         [{seg.language}]
+                      </span>
+                    )}
+                    {seg.isPartial && (
+                      <span className="text-[9px] text-emerald-300 uppercase tracking-wider font-bold animate-pulse">
+                        En vivo
                       </span>
                     )}
                   </div>

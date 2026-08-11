@@ -23,7 +23,7 @@ export interface AISummary {
 }
 
 export interface Settings {
-  aiEngine: "cloud" | "local";
+  aiEngine: "moonshine" | "local" | "cloud";
   chunkDurationSec: number; // e.g. 3, 4, 5
   inputLanguage: "auto" | "spanish" | "english";
   autoTranslate: boolean;

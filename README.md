@@ -1,12 +1,12 @@
 # 🎙️ VoxStream - Transcripción en Vivo & Asistente de Pantalla (AI Exam Helper)
 
-VoxStream es una aplicación web full-stack que permite compartir el audio y la pantalla de cualquier pestaña del navegador (YouTube, Google Meet, Twitch, Zoom, etc.) para obtener **transcripción de voz en vivo procesada localmente con Whisper**, además de **traducción**, **resúmenes ejecutivos** y **consultas visuales con IA** impulsadas por Gemini.
+VoxStream es una aplicación web full-stack que permite compartir el audio y la pantalla de cualquier pestaña del navegador (YouTube, Google Meet, Twitch, Zoom, etc.) para obtener **transcripción de voz en vivo procesada localmente con Moonshine o Whisper**, además de **traducción**, **resúmenes ejecutivos** y **consultas visuales con IA** impulsadas por Gemini.
 
 ---
 
 ## ⚡ Características Principales
 
-- 🎙️ **Transcripción Local en Tiempo Real:** Whisper Tiny procesa el micrófono o la pista compartida dentro del navegador mediante WebGPU o WASM. El modelo se descarga una vez y queda en la caché del navegador.
+- 🎙️ **Transcripción Local en Tiempo Real:** Moonshine procesa inglés o español en el navegador y actualiza texto provisional cada 0,5 segundos. El modo automático usa Whisper una vez para elegir el modelo; Whisper también permanece disponible como motor de compatibilidad.
 - 🌐 **Traducción Simultánea:** Traduce automáticamente la conversación al idioma seleccionado.
 - ⚡ **Asistente Rápido de Pantalla (Exam Helper):** Captura fotogramas compresos en vivo y responde preguntas visuales (exámenes, fórmulas, gráficas) con ultra bajo consumo de tokens.
 - 💬 **Chat Inteligente Multimodal:** Realiza consultas a Gemini combinando la transcripción acumulada y la captura de pantalla actual.
@@ -27,7 +27,7 @@ VoxStream es una aplicación web full-stack que permite compartir el audio y la 
 2. Haz clic en **Add New...** > **Project**.
 3. Importa tu nuevo repositorio de GitHub (`voxstream-live-transcriber`).
 4. En la sección **Environment Variables** (Variables de Entorno), agrega:
-   - `GEMINI_API_KEY`: opcional; solo es necesaria para preguntas, resúmenes, traducción o si el usuario selecciona manualmente la transcripción Cloud ([consíguela en Google AI Studio](https://aistudio.google.com/)). Whisper local no utiliza esta clave.
+   - `GEMINI_API_KEY`: opcional; solo es necesaria para preguntas, resúmenes, traducción o si el usuario selecciona manualmente la transcripción Cloud ([consíguela en Google AI Studio](https://aistudio.google.com/)). Moonshine y Whisper no utilizan esta clave.
 5. Haz clic en **Deploy**. ¡Listo!
 
 ---
@@ -47,3 +47,10 @@ npm run dev
 ```
 
 Abre `http://localhost:3000` en tu navegador.
+
+## Licencias de transcripción
+
+El motor y modelo inglés de Moonshine usan MIT. El modelo español se distribuye
+bajo la Moonshine AI Community License y requiere registro para uso comercial.
+Consulta [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) y
+[MOONSHINE_LICENSE.txt](./MOONSHINE_LICENSE.txt) antes de publicar.

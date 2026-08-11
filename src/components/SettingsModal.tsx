@@ -1,11 +1,12 @@
 import React from "react";
 import { Settings } from "../types";
-import { Settings as SettingsIcon, X, Sliders, Type, Languages, Clock, Eye } from "lucide-react";
+import { Settings as SettingsIcon, X, Sliders, Type, Languages, Clock, Eye, ExternalLink } from "lucide-react";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   settings: Settings;
+  isTranscribing: boolean;
   onUpdateSettings: (newSettings: Partial<Settings>) => void;
 }
 
@@ -13,6 +14,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   settings,
+  isTranscribing,
   onUpdateSettings,
 }) => {
   if (!isOpen) return null;
@@ -46,12 +48,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </label>
             <select
               value={settings.aiEngine}
+              disabled={isTranscribing}
               onChange={(e) => onUpdateSettings({ aiEngine: e.target.value as Settings["aiEngine"] })}
-              className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
+              className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md disabled:opacity-50"
             >
-              <option value="local">Local (Whisper) - Recomendado, sin API key</option>
+              <option value="moonshine">Tiempo real (Moonshine) - Recomendado</option>
+              <option value="local">Compatibilidad (Whisper local)</option>
               <option value="cloud">Cloud (Gemini) - Solo si el usuario lo elige</option>
             </select>
+            {isTranscribing && (
+              <p className="text-[10px] text-amber-300 mt-1.5 ml-1">
+                Detén la captura para cambiar el motor o el idioma.
+              </p>
+            )}
+            {settings.aiEngine === "moonshine" && (
+              <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
+                Local, sin API key y con actualizaciones cada 0,5 s. Whisper se conserva como respaldo.
+              </p>
+            )}
             {settings.aiEngine === "cloud" && (
               <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
                 Gemini requiere una API key del servidor y solo se usará mientras este modo esté seleccionado.
@@ -60,7 +74,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {/* Chunk interval */}
-          <div>
+          {settings.aiEngine !== "moonshine" && <div>
             <label className="block text-slate-200 font-semibold mb-1 flex items-center gap-1.5">
               <Clock size={14} className="text-cyan-400" />
               <span>Intervalo de Envío / Buffer</span>
@@ -75,7 +89,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <option value={3.0}>3.0s (Estable - Recomendado para portátiles)</option>
               <option value={5.0}>5.0s (Lento - Para PCs de bajos recursos)</option>
             </select>
-          </div>
+          </div>}
 
           <div>
             <label className="block text-slate-200 font-semibold mb-1 flex items-center gap-1.5">
@@ -84,21 +98,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </label>
             <select
               value={settings.inputLanguage}
+              disabled={isTranscribing}
               onChange={(e) =>
                 onUpdateSettings({
                   inputLanguage: e.target.value as Settings["inputLanguage"],
                 })
               }
-              className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
+              className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md disabled:opacity-50"
             >
-              <option value="auto">Automático (Más lento - Detectar idioma)</option>
-              <option value="english">Inglés Fijo (Más rápido y óptimo)</option>
-              <option value="spanish">Español Fijo (Más rápido y óptimo)</option>
+              <option value="auto">Automático ES/EN (detección inicial)</option>
+              <option value="english">
+                {settings.aiEngine === "moonshine" ? "Solo inglés (Small/Tiny Streaming)" : "Inglés fijo"}
+              </option>
+              <option value="spanish">
+                {settings.aiEngine === "moonshine" ? "Solo español (Base Spanish)" : "Español fijo"}
+              </option>
             </select>
             <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
-              Fijar el idioma evita que la IA procese la detección, acelerando significativamente la respuesta.
+              {settings.aiEngine === "moonshine"
+                ? "Los modos fijos comienzan antes. Automático usa Whisper una sola vez y luego cambia a Moonshine."
+                : "Fijar el idioma evita el coste de detección automática."}
             </p>
           </div>
+
+          {settings.aiEngine === "moonshine" && (
+            <div className="p-3 bg-cyan-400/5 border border-cyan-400/20 rounded-xl text-[10px] text-slate-300 leading-relaxed">
+              <p className="font-semibold text-cyan-300">Powered by Moonshine AI</p>
+              <p>Inglés: MIT. Español: licencia comunitaria gratuita con condiciones comerciales.</p>
+              <a
+                href="/MOONSHINE_LICENSE.txt"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 mt-1 text-cyan-400 hover:text-cyan-300 underline"
+              >
+                Ver licencia <ExternalLink size={10} />
+              </a>
+            </div>
+          )}
 
           {/* Auto Translate Settings */}
           <div className="p-3.5 bg-white/5 border border-white/10 rounded-xl space-y-3 backdrop-blur-md">
