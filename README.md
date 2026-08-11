@@ -7,6 +7,7 @@ VoxStream es una aplicación web full-stack que permite compartir el audio y la 
 ## ⚡ Características Principales
 
 - 🎙️ **Transcripción Local en Tiempo Real:** Moonshine procesa inglés o español en el navegador y actualiza texto provisional cada 0,5 segundos. El modo automático usa Whisper una vez para elegir el modelo; Whisper también permanece disponible como motor de compatibilidad.
+- ⏳ **Preparación Inicial Completa:** la pantalla de arranque descarga y verifica Whisper, Moonshine inglés y Moonshine español con progreso continuo antes de habilitar la captura; las siguientes visitas reutilizan la caché del navegador.
 - 🌐 **Traducción Simultánea:** Traduce automáticamente la conversación al idioma seleccionado.
 - ⚡ **Asistente Rápido de Pantalla (Exam Helper):** Captura fotogramas compresos en vivo y responde preguntas visuales (exámenes, fórmulas, gráficas) con ultra bajo consumo de tokens.
 - 💬 **Chat Inteligente Multimodal:** Realiza consultas a Gemini combinando la transcripción acumulada y la captura de pantalla actual.

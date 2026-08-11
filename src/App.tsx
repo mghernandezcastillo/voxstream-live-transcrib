@@ -55,6 +55,12 @@ const WEBGPU_INFERENCE_TIMEOUT_MS = 45_000;
 const WASM_INFERENCE_TIMEOUT_MS = 120_000;
 const MOONSHINE_CHUNK_DURATION_SEC = 0.5;
 const AUTO_LANGUAGE_PROBE_SEC = 3;
+const WHISPER_STARTUP_PROGRESS_END = 25;
+
+function formatModelBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+}
 
 export default function App() {
   // State
@@ -70,7 +76,7 @@ export default function App() {
   const [localEngineStatus, setLocalEngineStatus] = useState<LocalEngineStatus>("idle");
   const [localEngineBackend, setLocalEngineBackend] = useState<"webgpu" | "wasm" | null>(null);
   const [lastInferenceLatencyMs, setLastInferenceLatencyMs] = useState<number | null>(null);
-  const [hasLocalEngineLoadedOnce, setHasLocalEngineLoadedOnce] = useState(false);
+  const [startupReady, setStartupReady] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatus, setDownloadStatus] = useState("");
   const [runtimeEngine, setRuntimeEngine] = useState<RuntimeEngine>("moonshine");
@@ -133,6 +139,12 @@ export default function App() {
   const moonshineAudioQueueRef = useRef<LocalAudioChunk[]>([]);
   const moonshineActiveChunkRef = useRef<LocalAudioChunk | null>(null);
   const moonshineFinalLineIdsRef = useRef(new Set<string>());
+  const moonshinePreloadWorkerRef = useRef<Worker | null>(null);
+  const moonshinePreloadStartedRef = useRef(false);
+  const moonshinePreloadRetriesRef = useRef(0);
+  const startupReadyRef = useRef(false);
+  const startupCompletionTimeoutRef = useRef<number | null>(null);
+  const startupRetryTimeoutRef = useRef<number | null>(null);
   const autoLanguageProbeRunningRef = useRef(false);
   const detectedLanguageRef = useRef<OptimizedLanguage | null>(null);
   const activeRuntimeEngineRef = useRef<RuntimeEngine>("moonshine");
@@ -163,6 +175,10 @@ export default function App() {
       localWorkerRef.current = null;
       moonshineWorkerRef.current?.terminate();
       moonshineWorkerRef.current = null;
+      moonshinePreloadWorkerRef.current?.terminate();
+      moonshinePreloadWorkerRef.current = null;
+      if (startupCompletionTimeoutRef.current) clearTimeout(startupCompletionTimeoutRef.current);
+      if (startupRetryTimeoutRef.current) clearTimeout(startupRetryTimeoutRef.current);
     };
   }, []);
 
@@ -448,6 +464,121 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineActiveChunkRef.current = null;
   };
 
+  const completeStartupPreload = (status: string) => {
+    if (startupReadyRef.current) return;
+    setDownloadProgress(100);
+    setDownloadStatus(status);
+    if (startupCompletionTimeoutRef.current) clearTimeout(startupCompletionTimeoutRef.current);
+    startupCompletionTimeoutRef.current = window.setTimeout(() => {
+      if (!isMountedRef.current) return;
+      startupReadyRef.current = true;
+      setStartupReady(true);
+    }, 800);
+  };
+
+  const startMoonshineStartupPreload = () => {
+    if (
+      !isMountedRef.current ||
+      startupReadyRef.current ||
+      moonshinePreloadStartedRef.current
+    ) {
+      return;
+    }
+
+    moonshinePreloadStartedRef.current = true;
+    setDownloadProgress((previous) => Math.max(previous, WHISPER_STARTUP_PROGRESS_END));
+    setDownloadStatus("2/3 · Preparando modelos Moonshine...");
+
+    const failPreload = (reason: string) => {
+      moonshinePreloadWorkerRef.current?.terminate();
+      moonshinePreloadWorkerRef.current = null;
+      moonshinePreloadStartedRef.current = false;
+
+      if (moonshinePreloadRetriesRef.current < 1) {
+        moonshinePreloadRetriesRef.current += 1;
+        setDownloadStatus("Reconectando la descarga de Moonshine...");
+        startupRetryTimeoutRef.current = window.setTimeout(
+          startMoonshineStartupPreload,
+          1_500,
+        );
+        return;
+      }
+
+      console.error("[VoxStream Moonshine Preload]", reason);
+      setErrorMessage(
+        `⚠️ Whisper quedó preparado, pero Moonshine no pudo precargarse (${reason}). Se reintentará al seleccionarlo.`,
+      );
+      completeStartupPreload("Whisper preparado; Moonshine se descargará al usarlo");
+    };
+
+    try {
+      const worker = new Worker(
+        new URL("./workers/moonshineModelPreload.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+      moonshinePreloadWorkerRef.current = worker;
+
+      worker.onmessage = ({ data }) => {
+        if (moonshinePreloadWorkerRef.current !== worker) return;
+
+        if (data?.type === "phase") {
+          const stage = Math.min(3, Math.max(2, Number(data.stage || 2)));
+          setDownloadStatus(`${stage}/3 · ${String(data.label || "Preparando Moonshine")}`);
+          return;
+        }
+
+        if (data?.type === "progress") {
+          const loaded = Number(data.loaded || 0);
+          const total = Number(data.total || 0);
+          const ratio = total > 0 ? Math.min(1, loaded / total) : 0;
+          setDownloadProgress((previous) => Math.max(
+            previous,
+            Math.min(99, Math.round(
+              WHISPER_STARTUP_PROGRESS_END + ratio * (99 - WHISPER_STARTUP_PROGRESS_END),
+            )),
+          ));
+          const transferred = total > 0
+            ? ` · ${formatModelBytes(loaded)} / ${formatModelBytes(total)}`
+            : "";
+          const stage = Math.min(3, Math.max(2, Number(data.stage || 2)));
+          setDownloadStatus(
+            `${stage}/3 · ${String(data.label || "Moonshine")} · ${String(data.file || "modelo")}${transferred}`,
+          );
+          return;
+        }
+
+        if (data?.type === "ready") {
+          worker.terminate();
+          moonshinePreloadWorkerRef.current = null;
+          moonshinePreloadStartedRef.current = false;
+          console.log(
+            `[VoxStream] Modelos Moonshine precargados: ${Array.isArray(data.models) ? data.models.join(", ") : "inglés y español"}.`,
+          );
+          completeStartupPreload("3/3 · Whisper y Moonshine preparados");
+          return;
+        }
+
+        if (data?.type === "error") {
+          failPreload(String(data.message || "error de descarga"));
+        }
+      };
+
+      worker.onerror = (event) => {
+        if (moonshinePreloadWorkerRef.current !== worker) return;
+        failPreload(event.message || "el worker de precarga no pudo arrancar");
+      };
+
+      const logicalCores = Number(navigator.hardwareConcurrency) || 1;
+      const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
+      const englishModel = logicalCores <= 4 || (deviceMemory > 0 && deviceMemory <= 4)
+        ? "tiny"
+        : "small";
+      worker.postMessage({ type: "preload", englishModel });
+    } catch (error) {
+      failPreload(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const drainMoonshineAudioQueue = () => {
     if (
       !isRecordingRef.current ||
@@ -595,7 +726,6 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           moonshineWorkerReadyRef.current = true;
           setLocalEngineStatus("ready");
           setLocalEngineBackend("wasm");
-          setHasLocalEngineLoadedOnce(true);
           setDownloadProgress(100);
           setDownloadStatus("Moonshine preparado");
           console.log(
@@ -985,14 +1115,24 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             
             if (totalSize > 0) {
                const overallProgress = Math.round((totalLoaded / totalSize) * 100);
-               setDownloadProgress(overallProgress);
-               setDownloadStatus(`Descargando modelo: ${fileName} (${Math.round(progress)}%)`);
+               setDownloadProgress((previous) => (
+                 startupReadyRef.current
+                   ? overallProgress
+                   : Math.max(previous, Math.min(24, Math.round(overallProgress * 0.24)))
+               ));
+               setDownloadStatus(
+                 `${startupReadyRef.current ? "" : "1/3 · "}Descargando Whisper: ${fileName} (${Math.round(progress)}%)`,
+               );
             }
           } else if (status === "initiate") {
              downloadProgressCache.current[fileName] = { loaded: 0, total: 100 }; // placeholder total
-             setDownloadStatus(`Iniciando descarga: ${fileName}`);
+             setDownloadStatus(
+               `${startupReadyRef.current ? "" : "1/3 · "}Iniciando Whisper: ${fileName}`,
+             );
           } else if (status === "ready" || status === "done") {
-             setDownloadStatus(`Descarga completa`);
+             setDownloadStatus(
+               startupReadyRef.current ? "Descarga completa" : "1/3 · Finalizando Whisper local",
+             );
              if (Object.keys(downloadProgressCache.current).length > 0) {
                let totalLoaded = 0;
                let totalSize = 0;
@@ -1001,16 +1141,22 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
                  totalSize += p.total;
                });
                if (totalSize > 0 && totalLoaded === totalSize) {
-                 setDownloadProgress(100);
+                 setDownloadProgress((previous) => (
+                   startupReadyRef.current ? 100 : Math.max(previous, 24)
+                 ));
                }
              } else {
-               setDownloadProgress(100);
+               setDownloadProgress((previous) => (
+                 startupReadyRef.current ? 100 : Math.max(previous, 24)
+               ));
              }
         }
         }
 
         if (data?.type === "backend-fallback") {
-          setDownloadStatus("WebGPU no fue compatible; continuando automáticamente con WASM...");
+          setDownloadStatus(
+            `${startupReadyRef.current ? "" : "1/3 · "}WebGPU no fue compatible; preparando Whisper con WASM...`,
+          );
           return;
         }
 
@@ -1023,9 +1169,14 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           localWorkerReadyRef.current = true;
           localWorkerFailedRef.current = false;
           setLocalEngineStatus("ready");
-          setHasLocalEngineLoadedOnce(true);
-          setDownloadProgress(100);
-          setDownloadStatus("Whisper local preparado");
+          if (startupReadyRef.current) {
+            setDownloadProgress(100);
+            setDownloadStatus("Whisper local preparado");
+          } else {
+            setDownloadProgress((previous) => Math.max(previous, WHISPER_STARTUP_PROGRESS_END));
+            setDownloadStatus("1/3 · Whisper preparado; iniciando Moonshine...");
+            startMoonshineStartupPreload();
+          }
           console.log(
             `[VoxStream] Whisper local listo con ${String(data.backend).toUpperCase()}.`,
           );
@@ -1678,7 +1829,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950 antialiased relative overflow-x-hidden">
       {/* Loading Overlay */}
       <AnimatePresence>
-        {!hasLocalEngineLoadedOnce && (localEngineStatus === "loading" || localEngineStatus === "idle") && (
+        {!startupReady && (
           <motion.div 
             initial={{ opacity: 1, backdropFilter: "blur(0px)" }}
             exit={{ opacity: 0, scale: 1.1, backdropFilter: "blur(10px)" }}
@@ -1775,11 +1926,26 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
                   }}
                   className="text-sm font-mono px-4 py-1.5 rounded-full border"
                 >
-                  {downloadProgress === 100 ? "Ensamblando pipeline local..." : (downloadStatus || "Preparando modelos...")}
+                  {downloadStatus || (downloadProgress === 100 ? "Sistema preparado" : "Preparando modelos...")}
                 </motion.div>
+
+                <div
+                  className="w-72 sm:w-96 h-2 overflow-hidden rounded-full border border-white/10 bg-slate-950/80 shadow-inner"
+                  role="progressbar"
+                  aria-label="Progreso de preparación de los motores locales"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={downloadProgress}
+                >
+                  <motion.div
+                    className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 shadow-[0_0_16px_rgba(34,211,238,0.55)]"
+                    animate={{ width: `${downloadProgress}%` }}
+                    transition={{ duration: 0.25, ease: "easeOut" }}
+                  />
+                </div>
                 
                 <p className="text-xs text-slate-400 mt-4 leading-relaxed px-4">
-                  VoxStream descarga el motor local una sola vez y conserva los modelos en la caché del navegador.
+                  VoxStream prepara Whisper y Moonshine en inglés y español una sola vez, y conserva sus modelos en la caché del navegador.
                 </p>
               </div>
             </div>
