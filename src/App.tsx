@@ -31,6 +31,7 @@ import {
   Volume2,
   Tv,
   Zap,
+  Languages,
 } from "lucide-react";
 
 type LocalEngineStatus = "idle" | "loading" | "ready" | "fallback";
@@ -68,7 +69,7 @@ export default function App() {
 
   // Settings
   const [settings, setSettings] = useState<Settings>({
-    aiEngine: "cloud",
+    aiEngine: "local",
     chunkDurationSec: 1.2,
     inputLanguage: "english",
     autoTranslate: false,
@@ -105,6 +106,9 @@ export default function App() {
   const chunkIntervalRef = useRef<number | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const startTimeRef = useRef<number>(0);
+
+  // For tracking model download progress properly across multiple concurrent files
+  const downloadProgressCache = useRef<Record<string, { loaded: number; total: number }>>({});
 
   // Cleanup on unmount
   useEffect(() => {
@@ -429,16 +433,42 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         }
 
         if (data?.type === "progress") {
-          const { status, name, file, progress } = data.progress;
-          if (status === "progress" && progress !== undefined) {
-            setDownloadProgress(Math.round(progress));
-            setDownloadStatus(`Descargando modelo: ${file || name || ""} (${Math.round(progress)}%)`);
+          const { status, name, file, progress, loaded, total } = data.progress;
+          const fileName = file || name || "unknown";
+
+          if (status === "progress" && loaded !== undefined && total !== undefined) {
+            downloadProgressCache.current[fileName] = { loaded, total };
+            
+            let totalLoaded = 0;
+            let totalSize = 0;
+            Object.values(downloadProgressCache.current).forEach((p) => {
+              totalLoaded += p.loaded;
+              totalSize += p.total;
+            });
+            
+            if (totalSize > 0) {
+               const overallProgress = Math.round((totalLoaded / totalSize) * 100);
+               setDownloadProgress(overallProgress);
+               setDownloadStatus(`Descargando modelo: ${fileName} (${Math.round(progress)}%)`);
+            }
           } else if (status === "initiate") {
-             setDownloadStatus(`Iniciando descarga: ${file || name || ""}`);
-             setDownloadProgress(0);
+             downloadProgressCache.current[fileName] = { loaded: 0, total: 100 }; // placeholder total
+             setDownloadStatus(`Iniciando descarga: ${fileName}`);
           } else if (status === "ready" || status === "done") {
              setDownloadStatus(`Descarga completa`);
-             setDownloadProgress(100);
+             if (Object.keys(downloadProgressCache.current).length > 0) {
+               let totalLoaded = 0;
+               let totalSize = 0;
+               Object.values(downloadProgressCache.current).forEach((p) => {
+                 totalLoaded += p.loaded;
+                 totalSize += p.total;
+               });
+               if (totalSize > 0 && totalLoaded === totalSize) {
+                 setDownloadProgress(100);
+               }
+             } else {
+               setDownloadProgress(100);
+             }
           }
         }
 
@@ -998,6 +1028,32 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
         {/* Global Toolbar Action Buttons */}
         <div className="flex items-center gap-2">
+          {/* Quick Language Selector */}
+          <div className="hidden md:flex items-center bg-white/5 border border-white/10 rounded-xl px-1 py-1 mr-2 backdrop-blur-md">
+            <button
+              onClick={() => setSettings(s => ({ ...s, inputLanguage: 'english' }))}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${settings.inputLanguage === 'english' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              title="Inglés Fijo (Optimizado)"
+            >
+              EN
+            </button>
+            <button
+              onClick={() => setSettings(s => ({ ...s, inputLanguage: 'spanish' }))}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${settings.inputLanguage === 'spanish' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              title="Español Fijo (Optimizado)"
+            >
+              ES
+            </button>
+            <button
+              onClick={() => setSettings(s => ({ ...s, inputLanguage: 'auto' }))}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${settings.inputLanguage === 'auto' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              title="Automático (Lento)"
+            >
+              <Languages size={12} className={settings.inputLanguage === 'auto' ? 'text-slate-950' : 'text-cyan-400'} />
+              <span>Auto</span>
+            </button>
+          </div>
+
           {/* Fast Screen Helper / Exam Assistant */}
           <button
             onClick={() => setShowFastHelperModal(true)}
