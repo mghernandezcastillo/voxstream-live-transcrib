@@ -8,6 +8,13 @@ import {
   Settings,
 } from "./types";
 import { formatTimestamp, blobToBase64, getSupportedAudioMimeType } from "./utils/audioUtils";
+import {
+  measureAudioLevel,
+  shouldSwitchWebGPUToWasm,
+  takeCoalescedChunk,
+  trimAudioQueue,
+  type LocalAudioChunk,
+} from "./utils/localAudioQueue";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { TabShareGuideModal } from "./components/TabShareGuideModal";
 import { LiveTranscriptStream } from "./components/LiveTranscriptStream";
@@ -34,15 +41,12 @@ import {
   Languages,
 } from "lucide-react";
 
-type LocalEngineStatus = "idle" | "loading" | "ready" | "fallback";
+type LocalEngineStatus = "idle" | "loading" | "ready" | "error";
 
-type LocalAudioChunk = {
-  id: string;
-  audio: Float32Array;
-  sampleRate: number;
-  language: "auto" | "spanish" | "english";
-  sessionId: number;
-};
+const MAX_INFERENCE_AUDIO_SEC = 15;
+const MAX_BUFFERED_AUDIO_SEC = 90;
+const WEBGPU_INFERENCE_TIMEOUT_MS = 45_000;
+const WASM_INFERENCE_TIMEOUT_MS = 120_000;
 
 export default function App() {
   // State
@@ -57,6 +61,8 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [localEngineStatus, setLocalEngineStatus] = useState<LocalEngineStatus>("idle");
   const [localEngineBackend, setLocalEngineBackend] = useState<"webgpu" | "wasm" | null>(null);
+  const [lastInferenceLatencyMs, setLastInferenceLatencyMs] = useState<number | null>(null);
+  const [hasLocalEngineLoadedOnce, setHasLocalEngineLoadedOnce] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatus, setDownloadStatus] = useState("");
 
@@ -70,7 +76,7 @@ export default function App() {
   // Settings
   const [settings, setSettings] = useState<Settings>({
     aiEngine: "local",
-    chunkDurationSec: 2.5,
+    chunkDurationSec: 2.0,
     inputLanguage: "english",
     autoTranslate: false,
     targetLanguage: "Español",
@@ -85,7 +91,8 @@ export default function App() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioProcessorRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const segmentsRef = useRef<TranscriptSegment[]>([]);
   const isRecordingRef = useRef<boolean>(false);
@@ -95,12 +102,23 @@ export default function App() {
   const localWorkerReadyRef = useRef(false);
   const localWorkerFailedRef = useRef(false);
   const localWorkerBusyRef = useRef(false);
+  const localWorkerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localWorkerGenerationRef = useRef(0);
+  const localWorkerForceWasmRef = useRef(false);
+  const localWorkerConsecutiveErrorsRef = useRef(0);
+  const localWebGpuSlowResultsRef = useRef(0);
+  const localWorkerBackendRef = useRef<"webgpu" | "wasm" | null>(null);
+  const localWorkerTestResolversRef = useRef(
+    new Map<string, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>(),
+  );
   const localAudioQueueRef = useRef<LocalAudioChunk[]>([]);
+
   const localActiveChunkRef = useRef<LocalAudioChunk | null>(null);
   const localSessionIdRef = useRef(0);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
-  const lastAppendPromiseRef = useRef<Promise<void>>(Promise.resolve());
-  const activeNetworkRequestsCount = useRef<number>(0);
+  const settingsRef = useRef(settings);
+  const queueOverflowWarnedRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   const timerRef = useRef<number | null>(null);
   const chunkIntervalRef = useRef<number | null>(null);
@@ -112,7 +130,9 @@ export default function App() {
 
   // Cleanup on unmount
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       stopTranscription();
       localWorkerRef.current?.terminate();
       localWorkerRef.current = null;
@@ -129,6 +149,10 @@ export default function App() {
   useEffect(() => {
     segmentsRef.current = segments;
   }, [segments]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   // Duration Timer
   useEffect(() => {
@@ -283,54 +307,27 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     const currentMs = Date.now() - startTimeRef.current;
     
     setSegments((previousSegments) => {
-      const lastSegment = previousSegments[previousSegments.length - 1];
-      // Check if we should merge with the previous segment
-      // (if it doesn't end with a punctuation mark, and wasn't too long ago)
-      const normalizeLang = (l?: string) => {
-        if (!l) return "";
-        const lower = l.toLowerCase();
-        if (lower.includes("ingl") || lower.includes("engl")) return "en";
-        if (lower.includes("espa") || lower.includes("span")) return "es";
-        return lower;
-      };
-
-      const shouldMerge =
-        lastSegment &&
-        !/[.?!]\s*$/.test(lastSegment.text) &&
-        (currentMs - lastSegment.rawTimestampMs) < 15000 &&
-        (!speaker || lastSegment.speaker === speaker) &&
-        (!language || !lastSegment.language || normalizeLang(lastSegment.language) === normalizeLang(language));
-
-      let segmentId = "";
-      let mergedText = cleanText;
+      // Publish every completed Whisper chunk immediately. Merging unfinished
+      // phrases here made new visible lines appear only every ~15 seconds.
+      const segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const newSegments = [...previousSegments];
+      newSegments.push({
+        id: segmentId,
+        timestamp: formatTimestamp(currentMs),
+        rawTimestampMs: currentMs,
+        text: cleanText,
+        speaker: speaker || undefined,
+        language: language || undefined,
+      });
 
-      if (shouldMerge) {
-        segmentId = lastSegment.id;
-        mergedText = `${lastSegment.text} ${cleanText}`;
-        newSegments[newSegments.length - 1] = {
-          ...lastSegment,
-          text: mergedText,
-        };
-      } else {
-        segmentId = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        newSegments.push({
-          id: segmentId,
-          timestamp: formatTimestamp(currentMs),
-          rawTimestampMs: currentMs,
-          text: cleanText,
-          speaker: speaker || undefined,
-          language: language || undefined,
-        });
-      }
-
-      if (settings.autoTranslate) {
+      const activeSettings = settingsRef.current;
+      if (activeSettings.autoTranslate) {
         void fetch("/api/translate-transcript", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            text: mergedText,
-            targetLanguage: settings.targetLanguage,
+            text: cleanText,
+            targetLanguage: activeSettings.targetLanguage,
           }),
         })
           .then((response) => response.json())
@@ -351,27 +348,73 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     });
   };
 
-  const sendChunkToGeminiFallback = (chunk: LocalAudioChunk) => {
-    if (!isRecordingRef.current || chunk.sessionId !== localSessionIdRef.current) return;
-    enqueueAudioChunk(encodeWAV(chunk.audio, chunk.sampleRate), "audio/wav");
-  };
+  const restartLocalTranscriptionWorker = (reason: string, preferWasm = false) => {
+    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
+    localWorkerTimeoutRef.current = null;
 
-  const activateGeminiFallback = (failedChunk?: LocalAudioChunk | null) => {
-    localWorkerFailedRef.current = true;
-    localWorkerReadyRef.current = false;
+    const activeChunk = localActiveChunkRef.current;
+    if (activeChunk?.sessionId === localSessionIdRef.current) {
+      localAudioQueueRef.current.unshift(activeChunk);
+    }
+
+    localActiveChunkRef.current = null;
     localWorkerBusyRef.current = false;
+    localWorkerReadyRef.current = false;
+    localWorkerGenerationRef.current += 1;
     localWorkerRef.current?.terminate();
     localWorkerRef.current = null;
-    setLocalEngineStatus("fallback");
     setIsProcessingChunk(false);
 
-    const queuedChunks = [
-      ...(failedChunk ? [failedChunk] : []),
-      ...localAudioQueueRef.current,
-    ];
-    localActiveChunkRef.current = null;
-    localAudioQueueRef.current = [];
-    queuedChunks.forEach(sendChunkToGeminiFallback);
+    if (preferWasm || localWorkerBackendRef.current === "webgpu") {
+      localWorkerForceWasmRef.current = true;
+    }
+
+    localWorkerConsecutiveErrorsRef.current += 1;
+    if (localWorkerConsecutiveErrorsRef.current >= 3) {
+      localWorkerFailedRef.current = true;
+      setLocalEngineStatus("error");
+      setErrorMessage(
+        "⚠️ Whisper local no pudo recuperarse. Detén y vuelve a iniciar la captura; Gemini solo se usará si lo eliges manualmente en Configuración.",
+      );
+      console.error(`[VoxStream Local Whisper] Motor detenido tras varios fallos: ${reason}`);
+      return;
+    }
+
+    setLocalEngineStatus("loading");
+    setDownloadStatus(
+      localWorkerForceWasmRef.current
+        ? "Reiniciando Whisper en modo compatible (WASM)..."
+        : "Reiniciando Whisper local...",
+    );
+    console.warn(`[VoxStream Local Whisper] Reinicio real del worker: ${reason}`);
+    window.setTimeout(() => {
+      if (isMountedRef.current) ensureLocalTranscriptionWorker();
+    }, 0);
+  };
+
+  const switchLocalWorkerToWasmForPerformance = (processingMs: number) => {
+    if (localWorkerForceWasmRef.current || localWorkerBackendRef.current !== "webgpu") return;
+
+    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
+    localWorkerTimeoutRef.current = null;
+    localWorkerForceWasmRef.current = true;
+    localWebGpuSlowResultsRef.current = 0;
+    localWorkerReadyRef.current = false;
+    localWorkerBusyRef.current = false;
+    localWorkerGenerationRef.current += 1;
+    localWorkerRef.current?.terminate();
+    localWorkerRef.current = null;
+    setIsProcessingChunk(false);
+    setLocalEngineStatus("loading");
+    setDownloadStatus(
+      `WebGPU tardó ${(processingMs / 1000).toFixed(1)} s; cambiando a WASM multihilo...`,
+    );
+    console.warn(
+      `[VoxStream Local Whisper] WebGPU demasiado lento (${(processingMs / 1000).toFixed(1)} s). Cambio adaptativo a WASM.`,
+    );
+    window.setTimeout(() => {
+      if (isMountedRef.current) ensureLocalTranscriptionWorker();
+    }, 0);
   };
 
   const drainLocalAudioQueue = () => {
@@ -384,15 +427,35 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       return;
     }
 
-    let nextChunk = localAudioQueueRef.current.shift();
-    while (nextChunk && nextChunk.sessionId !== localSessionIdRef.current) {
-      nextChunk = localAudioQueueRef.current.shift();
-    }
+    localAudioQueueRef.current = localAudioQueueRef.current.filter(
+      (chunk) => chunk.sessionId === localSessionIdRef.current,
+    );
+    if (localAudioQueueRef.current.length === 0) return;
+
+    // Coalesce pending audio in chronological order. Whisper's encoder has a
+    // large fixed cost, so this lets slow PCs catch up without losing dialogue.
+    const nextChunk = takeCoalescedChunk(
+      localAudioQueueRef.current,
+      MAX_INFERENCE_AUDIO_SEC,
+    );
     if (!nextChunk) return;
 
     localWorkerBusyRef.current = true;
     localActiveChunkRef.current = nextChunk;
     setIsProcessingChunk(true);
+
+    // A timed-out ONNX call cannot be cancelled. Terminate the worker itself;
+    // merely clearing the busy flag would start overlapping GPU inferences.
+    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
+    const timeoutMs = localWorkerBackendRef.current === "wasm"
+      ? WASM_INFERENCE_TIMEOUT_MS
+      : WEBGPU_INFERENCE_TIMEOUT_MS;
+    localWorkerTimeoutRef.current = setTimeout(() => {
+      restartLocalTranscriptionWorker(
+        `inferencia excedió ${Math.round(timeoutMs / 1000)} s`,
+        localWorkerBackendRef.current === "webgpu",
+      );
+    }, timeoutMs);
 
     try {
       localWorkerRef.current.postMessage({
@@ -401,16 +464,19 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         audio: nextChunk.audio,
         sampleRate: nextChunk.sampleRate,
         language: nextChunk.language,
+        backendPreference: localWorkerForceWasmRef.current ? "wasm" : "auto",
+        startedAt: performance.now(),
       });
     } catch (error) {
       console.error("[VoxStream Local Whisper] No se pudo enviar audio al worker:", error);
-      activateGeminiFallback(nextChunk);
+      restartLocalTranscriptionWorker("falló postMessage", true);
     }
   };
 
   const ensureLocalTranscriptionWorker = () => {
+    if (!isMountedRef.current) return;
     if (localWorkerFailedRef.current) {
-      setLocalEngineStatus("fallback");
+      setLocalEngineStatus("error");
       return;
     }
 
@@ -426,22 +492,31 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         { type: "module" },
       );
       localWorkerRef.current = worker;
+      const generation = ++localWorkerGenerationRef.current;
 
       worker.onmessage = ({ data }) => {
+        if (generation !== localWorkerGenerationRef.current) return;
         if (data?.backend === "webgpu" || data?.backend === "wasm") {
+          localWorkerBackendRef.current = data.backend;
           setLocalEngineBackend(data.backend);
         }
 
         if (data?.type === "progress") {
-          const { status, name, file, progress, loaded, total } = data.progress;
+          const progressData = (data.progress || {}) as Record<string, unknown>;
+          const status = String(progressData.status || "");
+          const name = String(progressData.name || "");
+          const file = String(progressData.file || "");
+          const progress = Number(progressData.progress || 0);
+          const loaded = Number(progressData.loaded);
+          const total = Number(progressData.total);
           const fileName = file || name || "unknown";
 
-          if (status === "progress" && loaded !== undefined && total !== undefined) {
+          if (status === "progress" && Number.isFinite(loaded) && Number.isFinite(total)) {
             downloadProgressCache.current[fileName] = { loaded, total };
             
             let totalLoaded = 0;
             let totalSize = 0;
-            Object.values(downloadProgressCache.current).forEach((p) => {
+            (Object.values(downloadProgressCache.current) as Array<{ loaded: number; total: number }>).forEach((p) => {
               totalLoaded += p.loaded;
               totalSize += p.total;
             });
@@ -459,7 +534,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
              if (Object.keys(downloadProgressCache.current).length > 0) {
                let totalLoaded = 0;
                let totalSize = 0;
-               Object.values(downloadProgressCache.current).forEach((p) => {
+               (Object.values(downloadProgressCache.current) as Array<{ loaded: number; total: number }>).forEach((p) => {
                  totalLoaded += p.loaded;
                  totalSize += p.total;
                });
@@ -469,24 +544,90 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
              } else {
                setDownloadProgress(100);
              }
-          }
+        }
+        }
+
+        if (data?.type === "backend-fallback") {
+          setDownloadStatus("WebGPU no fue compatible; continuando automáticamente con WASM...");
+          return;
+        }
+
+        if (data?.type === "warmup-warning") {
+          console.warn("[VoxStream Local Whisper] El calentamiento falló; se intentará la inferencia real.", data.message);
+          return;
         }
 
         if (data?.type === "ready") {
           localWorkerReadyRef.current = true;
+          localWorkerFailedRef.current = false;
           setLocalEngineStatus("ready");
+          setHasLocalEngineLoadedOnce(true);
+          setDownloadProgress(100);
+          setDownloadStatus("Whisper local preparado");
           console.log(
             `[VoxStream] Whisper local listo con ${String(data.backend).toUpperCase()}.`,
           );
+          if (import.meta.env.DEV) {
+            (window as any).__VOXSTREAM_TRANSCRIBE_TEST__ = (
+              audio: Float32Array,
+              sampleRate: number,
+              language: "auto" | "spanish" | "english" = "english",
+            ) => new Promise((resolve, reject) => {
+              if (!localWorkerReadyRef.current || !localWorkerRef.current) {
+                reject(new Error("Whisper local no está listo"));
+                return;
+              }
+              const id = `internal_test_${Date.now()}`;
+              const timeout = window.setTimeout(() => {
+                localWorkerTestResolversRef.current.delete(id);
+                reject(new Error("La prueba interna excedió 120 segundos"));
+              }, WASM_INFERENCE_TIMEOUT_MS);
+              localWorkerTestResolversRef.current.set(id, {
+                resolve: (value) => {
+                  clearTimeout(timeout);
+                  resolve(value);
+                },
+                reject: (reason) => {
+                  clearTimeout(timeout);
+                  reject(reason);
+                },
+              });
+              localWorkerRef.current!.postMessage({
+                type: "transcribe",
+                id,
+                audio,
+                sampleRate,
+                language,
+                backendPreference: localWorkerForceWasmRef.current ? "wasm" : "auto",
+              });
+            });
+          }
           drainLocalAudioQueue();
           return;
         }
 
         if (data?.type === "result") {
+          const testResolver = localWorkerTestResolversRef.current.get(data.id);
+          if (testResolver) {
+            localWorkerTestResolversRef.current.delete(data.id);
+            testResolver.resolve(data);
+            return;
+          }
+          if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
           const completedChunk = localActiveChunkRef.current;
           localActiveChunkRef.current = null;
           localWorkerBusyRef.current = false;
+          localWorkerConsecutiveErrorsRef.current = 0;
           setIsProcessingChunk(false);
+
+          const processingMs = Number(data.processingMs || 0);
+          const audioDurationSec = Number(data.audioDurationSec || 0);
+          if (processingMs > 0) {
+            setLastInferenceLatencyMs(processingMs);
+            console.log(
+              `[VoxStream Latency] ${data.backend}: ${(processingMs / 1000).toFixed(2)} s para ${audioDurationSec.toFixed(2)} s de audio.`,
+            );
+          }
 
           const text = String(data.text || "").trim();
           if (
@@ -500,25 +641,59 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             );
           }
 
+          if (data.backend === "webgpu" && audioDurationSec > 0) {
+            const realtimeRatio = processingMs / (audioDurationSec * 1000);
+            localWebGpuSlowResultsRef.current = processingMs >= 8_000 && realtimeRatio >= 2
+              ? localWebGpuSlowResultsRef.current + 1
+              : 0;
+            if (
+              shouldSwitchWebGPUToWasm(
+                processingMs,
+                audioDurationSec,
+                localWebGpuSlowResultsRef.current,
+              )
+            ) {
+              switchLocalWorkerToWasmForPerformance(processingMs);
+              return;
+            }
+          }
+
           drainLocalAudioQueue();
           return;
         }
 
         if (data?.type === "error") {
+          const testResolver = localWorkerTestResolversRef.current.get(data.id);
+          if (testResolver) {
+            localWorkerTestResolversRef.current.delete(data.id);
+            testResolver.reject(new Error(data.message || "Error de prueba de Whisper"));
+          }
+          if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
           console.error("[VoxStream Local Whisper]", data.message || "Error desconocido");
-          activateGeminiFallback(localActiveChunkRef.current);
+          restartLocalTranscriptionWorker(
+            data.message || "error de inferencia",
+            data.backend === "webgpu",
+          );
         }
       };
 
       worker.onerror = (event) => {
+        if (generation !== localWorkerGenerationRef.current) return;
+        if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
         console.error("[VoxStream Local Whisper Worker]", event.message || event);
-        activateGeminiFallback(localActiveChunkRef.current);
+        restartLocalTranscriptionWorker(
+          event.message || "error no controlado del worker",
+          localWorkerBackendRef.current === "webgpu",
+        );
       };
 
-      worker.postMessage({ type: "load" });
+      worker.postMessage({
+        type: "load",
+        backendPreference: localWorkerForceWasmRef.current ? "wasm" : "auto",
+      });
     } catch (error) {
       console.error("[VoxStream] No se pudo iniciar Whisper local:", error);
-      activateGeminiFallback();
+      restartLocalTranscriptionWorker("no se pudo crear el worker", true);
     }
   };
 
@@ -531,34 +706,33 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       audio,
       sampleRate,
-      language: settings.inputLanguage,
+      language: settingsRef.current.inputLanguage,
       sessionId: localSessionIdRef.current,
     };
 
-    if (settings.aiEngine === "cloud" || localWorkerFailedRef.current) {
-      sendChunkToGeminiFallback(chunk);
+    if (settingsRef.current.aiEngine === "cloud") {
+      enqueueAudioChunk(encodeWAV(chunk.audio, chunk.sampleRate), "audio/wav");
+      return;
+    }
+
+    if (localWorkerFailedRef.current) {
       return;
     }
 
     localAudioQueueRef.current.push(chunk);
-
-    // Several minutes of raw PCM still use modest memory. Drop only in an extreme
-    // stalled-load scenario; never send queued audio to Gemini just because loading is slow.
-    if (localAudioQueueRef.current.length > 200) {
-      localAudioQueueRef.current.shift();
-      console.warn("[VoxStream Local Whisper] Se descartó el fragmento más antiguo por cola saturada.");
+    const trimmed = trimAudioQueue(localAudioQueueRef.current, MAX_BUFFERED_AUDIO_SEC);
+    if (trimmed.droppedChunks > 0 && !queueOverflowWarnedRef.current) {
+      queueOverflowWarnedRef.current = true;
+      setErrorMessage(
+        `⚠️ Este equipo acumuló más de ${MAX_BUFFERED_AUDIO_SEC} s de audio. Se descartaron ${Math.round(trimmed.droppedDurationSec)} s antiguos para evitar agotar la memoria.`,
+      );
     }
 
     ensureLocalTranscriptionWorker();
     drainLocalAudioQueue();
   };
 
-  // Begin downloading/caching Whisper as soon as the app opens so capture starts quickly.
-  useEffect(() => {
-    ensureLocalTranscriptionWorker();
-  }, []);
-
-  // Whisper runs locally in the browser. Gemini is only a compatibility fallback.
+  // Whisper runs locally in the browser. Gemini is used only when selected.
   const startAudioRecorder = async (
     mediaStream: MediaStream,
     captureSource: AudioSourceType,
@@ -581,20 +755,35 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         audioContextRef.current = null;
       }
 
+      if (settingsRef.current.aiEngine === "local" && localWorkerFailedRef.current) {
+        localWorkerFailedRef.current = false;
+        localWorkerConsecutiveErrorsRef.current = 0;
+        localWorkerForceWasmRef.current = true;
+        setLocalEngineStatus("loading");
+      }
+
       isRecordingRef.current = true;
       localSessionIdRef.current += 1;
+      localWebGpuSlowResultsRef.current = 0;
+      setLastInferenceLatencyMs(null);
       startTimeRef.current = Date.now();
       setTranscriptionState("recording");
       ensureLocalTranscriptionWorker();
       console.log(
-        `[VoxStream] Captura de ${captureSource === "mic" ? "micrófono" : "pestaña"} iniciada con Whisper local.`,
+        `[VoxStream] Captura de ${captureSource === "mic" ? "micrófono" : "pestaña"} iniciada con ${settingsRef.current.aiEngine === "local" ? "Whisper local" : "Gemini elegido por el usuario"}.`,
       );
 
       let pcmBuffers: Float32Array[] = [];
 
       try {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioCtx({ sampleRate: 16_000 });
+        let ctx: AudioContext;
+        try {
+          ctx = new AudioCtx({ sampleRate: 16_000 });
+        } catch {
+          // Some Safari/older implementations reject an explicit sample rate.
+          ctx = new AudioCtx();
+        }
         if (ctx.state === "suspended") {
           await ctx.resume();
         }
@@ -603,58 +792,80 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         // Isolate audio tracks strictly in new MediaStream to prevent Chrome video track errors
         const audioOnlyStream = new MediaStream(audioTracks);
         const source = ctx.createMediaStreamSource(audioOnlyStream);
-        const processor = ctx.createScriptProcessor(4096, 1, 1);
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0;
         audioSourceRef.current = source;
-        audioProcessorRef.current = processor;
+        silentGainRef.current = silentGain;
 
-        processor.onaudioprocess = (e) => {
-          if (!isRecordingRef.current) return;
-          const input = e.inputBuffer.getChannelData(0);
-          pcmBuffers.push(new Float32Array(input));
-        };
-
-        source.connect(processor);
-        processor.connect(ctx.destination);
-
-        const intervalMs = settings.chunkDurationSec * 1000;
-        chunkIntervalRef.current = window.setInterval(async () => {
-          if (!isRecordingRef.current || pcmBuffers.length === 0) return;
-
-          const currentBuffers = pcmBuffers;
-          pcmBuffers = [];
-
-          const totalSamples = currentBuffers.reduce((acc, b) => acc + b.length, 0);
-          if (totalSamples < ctx.sampleRate * 0.3) return; // ignore tiny buffers (<0.3s)
-
-          const merged = new Float32Array(totalSamples);
-          let offset = 0;
-          for (const buf of currentBuffers) {
-            merged.set(buf, offset);
-            offset += buf.length;
-          }
-
-          let maxVal = 0;
-          for (let i = 0; i < merged.length; i++) {
-            const abs = Math.abs(merged[i]);
-            if (abs > maxVal) maxVal = abs;
-          }
-
-          console.log(`[VoxStream PCM Capture] Fragmento local: ${merged.length} muestras, nivel pico: ${maxVal.toFixed(4)} (${ctx.sampleRate}Hz)`);
-
-          const threshold = captureSource === "mic" ? 0.015 : 0.002;
-          if (maxVal < threshold) {
+        const processCapturedPcm = (merged: Float32Array) => {
+          if (!isRecordingRef.current || merged.length < ctx.sampleRate * 0.3) return;
+          const level = measureAudioLevel(merged);
+          const rmsThreshold = captureSource === "mic" ? 0.0015 : 0.0003;
+          if (level.rms < rmsThreshold && level.peak < rmsThreshold * 5) {
             if (captureSource !== "mic") {
-               console.warn(`[VoxStream Audio Warning] El nivel de audio capturado es casi cero (${maxVal.toFixed(4)}). Verifica que la pestaña de YouTube no esté silenciada y que activaste 'Compartir audio de la pestaña'.`);
+              console.warn(`[VoxStream Audio Warning] Audio casi silencioso (RMS ${level.rms.toFixed(5)}). Verifica que la pestaña no esté silenciada y que activaste "Compartir audio".`);
             }
             return;
           }
-
           enqueueLocalAudioChunk(merged, ctx.sampleRate);
-        }, intervalMs);
+        };
+
+        let usingAudioWorklet = false;
+
+        try {
+          if (!ctx.audioWorklet) throw new Error("AudioWorklet no disponible");
+          await ctx.audioWorklet.addModule("/pcm-capture-worklet.js?v=2");
+          const worklet = new AudioWorkletNode(ctx, "voxstream-pcm-capture", {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            processorOptions: {
+              chunkDurationSec: settingsRef.current.chunkDurationSec,
+            },
+          });
+          worklet.port.onmessage = ({ data }) => {
+            if (isRecordingRef.current && data instanceof Float32Array) {
+              processCapturedPcm(data);
+            }
+          };
+          worklet.addEventListener("processorerror", () => {
+            setErrorMessage("⚠️ El capturador de audio se detuvo inesperadamente. Detén e inicia otra vez la captura.");
+          });
+          audioProcessorRef.current = worklet;
+          usingAudioWorklet = true;
+        } catch (workletError) {
+          console.warn("AudioWorklet no disponible; usando respaldo ScriptProcessor:", workletError);
+          const processor = ctx.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = (event) => {
+            if (!isRecordingRef.current) return;
+            pcmBuffers.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+          };
+          audioProcessorRef.current = processor;
+        }
+
+        source.connect(audioProcessorRef.current);
+        audioProcessorRef.current.connect(silentGain);
+        silentGain.connect(ctx.destination);
+
+        if (!usingAudioWorklet) {
+          const intervalMs = settingsRef.current.chunkDurationSec * 1000;
+          chunkIntervalRef.current = window.setInterval(() => {
+            if (!isRecordingRef.current || pcmBuffers.length === 0) return;
+            const currentBuffers = pcmBuffers;
+            pcmBuffers = [];
+            const totalSamples = currentBuffers.reduce((total, buffer) => total + buffer.length, 0);
+            const merged = new Float32Array(totalSamples);
+            let offset = 0;
+            for (const buffer of currentBuffers) {
+              merged.set(buffer, offset);
+              offset += buffer.length;
+            }
+            processCapturedPcm(merged);
+          }, intervalMs);
+        }
 
       } catch (audioCtxErr) {
-        console.warn("AudioContext PCM capture failed, falling back to MediaRecorder:", audioCtxErr);
-        activateGeminiFallback();
+        console.warn("AudioContext PCM capture failed:", audioCtxErr);
 
         if (audioContextRef.current) {
           await audioContextRef.current.close().catch(() => {});
@@ -662,6 +873,19 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         }
         audioSourceRef.current = null;
         audioProcessorRef.current = null;
+        silentGainRef.current = null;
+
+        if (settingsRef.current.aiEngine !== "cloud") {
+          isRecordingRef.current = false;
+          mediaStream.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+          setStream(null);
+          setTranscriptionState("idle");
+          setErrorMessage(
+            "⚠️ Este navegador no pudo abrir Web Audio para Whisper local. Prueba la versión actual de Chrome o Edge y vuelve a compartir la pestaña con audio.",
+          );
+          return;
+        }
 
         const recordingStream = new MediaStream(audioTracks);
         const mimeType = getSupportedAudioMimeType();
@@ -683,7 +907,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           }
         };
 
-        mediaRecorder.start(settings.chunkDurationSec * 1000);
+        mediaRecorder.start(settingsRef.current.chunkDurationSec * 1000);
       }
     } catch (err: any) {
       console.error("Failed to start audio recorder:", err);
@@ -692,84 +916,86 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
   };
 
-  // Gemini normally takes longer than the capture interval. Process chunks in order
-  // instead of sending overlapping requests that can...
-  const enqueueAudioChunk = (blob: Blob, mimeType: string) => {
-    if (!isRecordingRef.current) return;
-    
-    activeNetworkRequestsCount.current += 1;
+  // Cloud mode is opt-in. Keep exactly one request in flight so a slow provider
+  // cannot create an unbounded set of overlapping requests or reorder text.
+  const drainAudioChunkQueue = async () => {
+    if (isDrainingChunkQueueRef.current || !isRecordingRef.current) return;
+    const nextChunk = audioChunkQueueRef.current.shift();
+    if (!nextChunk) {
+      setIsProcessingChunk(false);
+      return;
+    }
+
+    isDrainingChunkQueueRef.current = true;
     setIsProcessingChunk(true);
-    
-    // Start network request immediately in the background
-    const base64AudioPromise = blobToBase64(blob);
-    const previousContext = segmentsRef.current
-        .slice(-3)
-        .map((s) => s.text)
-        .join(" ");
-        
-    const networkPromise = base64AudioPromise.then(base64Audio => {
-      const abortController = new AbortController();
-      transcriptionAbortRef.current = abortController;
-      
-      return fetch("/api/transcribe-chunk", {
+    const abortController = new AbortController();
+    transcriptionAbortRef.current = abortController;
+    let timedOut = false;
+    const requestTimeout = window.setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, 45_000);
+
+    try {
+      const base64Audio = await blobToBase64(nextChunk.blob);
+      const previousContext = segmentsRef.current.slice(-3).map((segment) => segment.text).join(" ");
+      const activeSettings = settingsRef.current;
+      const response = await fetch("/api/transcribe-chunk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortController.signal,
         body: JSON.stringify({
           audioBase64: base64Audio,
-          mimeType,
+          mimeType: nextChunk.mimeType,
           previousContext,
-          targetLanguage: settings.autoTranslate ? settings.targetLanguage : "auto",
+          targetLanguage: activeSettings.autoTranslate ? activeSettings.targetLanguage : "auto",
         }),
       });
-    }).then(async (res) => {
-      const data = await res.json().catch(() => ({}));
-      return { res, data };
-    }).catch(err => {
-      return { error: err };
-    });
+      const data = await response.json().catch(() => ({}));
 
-    // Chain to visual append queue to preserve chronological sequence
-    lastAppendPromiseRef.current = lastAppendPromiseRef.current.then(async () => {
-      try {
-        const result: any = await networkPromise;
-        
-        if (result.error) {
-          if (result.error?.name === "AbortError") return;
-          console.error("Error processing chunk:", result.error);
-          setErrorMessage("⚠️ No se pudo conectar con el servicio de transcripción. Se volverá a intentar.");
-          return;
+      if (!response.ok) {
+        const message = data.error || `El servidor devolvió estado ${response.status}.`;
+        setErrorMessage(`⚠️ ${message}`);
+        if (data.code === "GEMINI_API_KEY_MISSING" || data.code === "TRANSCRIPTION_PROVIDER_ERROR") {
+          stopTranscription();
         }
-        
-        const { res, data } = result;
-        if (!res.ok) {
-          const message = data.error || `El servidor devolvió estado ${res.status}.`;
-          console.warn(`[VoxStream API Warning] Servidor devolvió ${res.status}:`, data);
-          setErrorMessage(`⚠️ ${message}`);
-          if (data.code === "GEMINI_API_KEY_MISSING" || data.code === "TRANSCRIPTION_PROVIDER_ERROR") {
-            stopTranscription();
-          }
-          return;
-        }
-        
-        if (data.error) {
-          setErrorMessage(`⚠️ ${data.error}`);
-          return;
-        }
-        
-        if (data.transcript && data.transcript.trim()) {
-          const text = data.transcript.trim();
-          console.log(`[VoxStream Transcripción] Nuevo texto detectado: "${text}"`);
-          appendTranscriptSegment(text, data.detectedLanguage, data.speaker);
-        }
-      } finally {
-        activeNetworkRequestsCount.current = Math.max(0, activeNetworkRequestsCount.current - 1);
-        if (activeNetworkRequestsCount.current === 0) {
-          setIsProcessingChunk(false);
-        }
+      } else if (data.error) {
+        setErrorMessage(`⚠️ ${data.error}`);
+      } else if (data.transcript?.trim()) {
+        appendTranscriptSegment(data.transcript.trim(), data.detectedLanguage, data.speaker);
+      }
+    } catch (error: any) {
+      if (error?.name !== "AbortError" || timedOut) {
+        console.error("Error processing cloud chunk:", error);
+        setErrorMessage(
+          timedOut
+            ? "⚠️ Gemini tardó más de 45 segundos y se canceló el fragmento."
+            : "⚠️ No se pudo conectar con el servicio de transcripción.",
+        );
+      }
+    } finally {
+      clearTimeout(requestTimeout);
+      if (transcriptionAbortRef.current === abortController) {
         transcriptionAbortRef.current = null;
       }
-    });
+      isDrainingChunkQueueRef.current = false;
+
+      if (isRecordingRef.current && audioChunkQueueRef.current.length > 0) {
+        void drainAudioChunkQueue();
+      } else {
+        setIsProcessingChunk(false);
+      }
+    }
+  };
+
+  const enqueueAudioChunk = (blob: Blob, mimeType: string) => {
+    if (!isRecordingRef.current) return;
+    audioChunkQueueRef.current.push({ blob, mimeType });
+    if (audioChunkQueueRef.current.length > 20) {
+      audioChunkQueueRef.current.shift();
+      setErrorMessage("⚠️ Gemini no alcanza el tiempo real; se descartó un fragmento antiguo de la cola cloud.");
+    }
+    void drainAudioChunkQueue();
   };
 
   // Pause / Resume
@@ -805,25 +1031,43 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     timerRef.current = null;
     audioChunkQueueRef.current = [];
     localAudioQueueRef.current = [];
-    if (!localActiveChunkRef.current) {
+    queueOverflowWarnedRef.current = false;
+    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
+    localWorkerTimeoutRef.current = null;
+
+    if (localActiveChunkRef.current) {
+      // Termination is the only reliable cancellation for an ONNX/WebGPU call.
+      localWorkerGenerationRef.current += 1;
+      localWorkerRef.current?.terminate();
+      localWorkerRef.current = null;
+      localWorkerReadyRef.current = false;
       localWorkerBusyRef.current = false;
+      localActiveChunkRef.current = null;
+      if (!localWorkerFailedRef.current) {
+        setLocalEngineStatus("loading");
+        window.setTimeout(() => {
+          if (isMountedRef.current) ensureLocalTranscriptionWorker();
+        }, 0);
+      }
     }
     setIsProcessingChunk(false);
     transcriptionAbortRef.current?.abort();
     transcriptionAbortRef.current = null;
 
-    lastAppendPromiseRef.current = Promise.resolve();
-    activeNetworkRequestsCount.current = 0;
-    
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
       recorderRef.current.stop();
     }
     recorderRef.current = null;
 
+    if (audioProcessorRef.current && "port" in audioProcessorRef.current) {
+      audioProcessorRef.current.port.onmessage = null;
+    }
     audioProcessorRef.current?.disconnect();
     audioSourceRef.current?.disconnect();
+    silentGainRef.current?.disconnect();
     audioProcessorRef.current = null;
     audioSourceRef.current = null;
+    silentGainRef.current = null;
 
     if (audioContextRef.current) {
       try {
@@ -891,7 +1135,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950 antialiased relative overflow-x-hidden">
       {/* Loading Overlay */}
       <AnimatePresence>
-        {(localEngineStatus === "loading" || localEngineStatus === "idle") && (
+        {!hasLocalEngineLoadedOnce && (localEngineStatus === "loading" || localEngineStatus === "idle") && (
           <motion.div 
             initial={{ opacity: 1, backdropFilter: "blur(0px)" }}
             exit={{ opacity: 0, scale: 1.1, backdropFilter: "blur(10px)" }}
@@ -992,7 +1236,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
                 </motion.div>
                 
                 <p className="text-xs text-slate-400 mt-4 leading-relaxed px-4">
-                  VoxStream procesa el audio localmente en tu dispositivo mediante WebGPU, garantizando latencia cero y máxima privacidad.
+                  VoxStream descarga Whisper una sola vez y procesa el audio localmente mediante WebGPU o WASM.
                 </p>
               </div>
             </div>
@@ -1213,6 +1457,8 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             <div
               data-local-engine-status={localEngineStatus}
               data-local-engine-backend={localEngineBackend || ""}
+              data-last-inference-ms={lastInferenceLatencyMs || ""}
+              title={lastInferenceLatencyMs ? `Última inferencia: ${(lastInferenceLatencyMs / 1000).toFixed(1)} segundos` : undefined}
               className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md"
             >
               <span
@@ -1226,13 +1472,15 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               />
               <span className="capitalize font-sans font-semibold text-slate-200">
                 {transcriptionState === "recording"
-                  ? localEngineStatus === "loading"
-                    ? "Cargando Whisper..."
-                    : localEngineStatus === "ready"
-                      ? `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}`
-                      : localEngineStatus === "fallback"
-                        ? "Respaldo Gemini"
-                        : "Capturando..."
+                  ? settings.aiEngine === "cloud"
+                    ? "Gemini Cloud (manual)"
+                    : localEngineStatus === "loading"
+                      ? "Cargando Whisper..."
+                      : localEngineStatus === "ready"
+                        ? `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}${lastInferenceLatencyMs ? ` · ${(lastInferenceLatencyMs / 1000).toFixed(1)} s` : ""}`
+                        : localEngineStatus === "error"
+                          ? "Whisper requiere reinicio"
+                          : "Capturando..."
                   : transcriptionState === "paused"
                   ? "En Pausa"
                   : transcriptionState === "requesting"

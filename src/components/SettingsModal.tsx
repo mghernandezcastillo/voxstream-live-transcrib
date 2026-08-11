@@ -49,12 +49,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onChange={(e) => onUpdateSettings({ aiEngine: e.target.value as Settings["aiEngine"] })}
               className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
             >
-              <option value="cloud">Cloud (Gemini 2.0 Flash) - Más rápido y preciso</option>
-              <option value="local">Local (Whisper) - Privacidad total</option>
+              <option value="local">Local (Whisper) - Recomendado, sin API key</option>
+              <option value="cloud">Cloud (Gemini) - Solo si el usuario lo elige</option>
             </select>
             {settings.aiEngine === "cloud" && (
               <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
-                Utilizando Gemini 2.0 Flash para una transcripción ultra rápida y sin alucinaciones.
+                Gemini requiere una API key del servidor y solo se usará mientras este modo esté seleccionado.
               </p>
             )}
           </div>
@@ -70,10 +70,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onChange={(e) => onUpdateSettings({ chunkDurationSec: Number(e.target.value) })}
               className="w-full bg-slate-950/60 border border-white/10 rounded-xl px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400 backdrop-blur-md"
             >
-              <option value={1.2}>1.2 segundos (Solo para PCs potentes)</option>
-              <option value={2.5}>2.5 segundos (Rápido y fluido - Recomendado)</option>
-              <option value={3}>3 segundos (Estable)</option>
-              <option value={5}>5 segundos (Mayor contexto)</option>
+              <option value={1.2}>1.2s (Rápido - Solo para PC Gamer/M1)</option>
+              <option value={2.0}>2.0s (Equilibrado)</option>
+              <option value={3.0}>3.0s (Estable - Recomendado para portátiles)</option>
+              <option value={5.0}>5.0s (Lento - Para PCs de bajos recursos)</option>
             </select>
           </div>
 

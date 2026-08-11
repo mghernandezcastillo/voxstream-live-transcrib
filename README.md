@@ -27,7 +27,7 @@ VoxStream es una aplicación web full-stack que permite compartir el audio y la 
 2. Haz clic en **Add New...** > **Project**.
 3. Importa tu nuevo repositorio de GitHub (`voxstream-live-transcriber`).
 4. En la sección **Environment Variables** (Variables de Entorno), agrega:
-   - `GEMINI_API_KEY`: necesaria para preguntas, resúmenes, traducción y únicamente como respaldo si Whisper local no puede iniciarse ([consíguela en Google AI Studio](https://aistudio.google.com/)).
+   - `GEMINI_API_KEY`: opcional; solo es necesaria para preguntas, resúmenes, traducción o si el usuario selecciona manualmente la transcripción Cloud ([consíguela en Google AI Studio](https://aistudio.google.com/)). Whisper local no utiliza esta clave.
 5. Haz clic en **Deploy**. ¡Listo!
 
 ---

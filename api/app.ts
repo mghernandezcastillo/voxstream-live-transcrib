@@ -2,6 +2,15 @@ import express from "express";
 
 const app = express();
 
+// ONNX Runtime Web needs SharedArrayBuffer to use multiple WASM threads.
+// Without cross-origin isolation, Whisper silently falls back to a much slower
+// single-threaded path on PCs without WebGPU.
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  next();
+});
+
 // Increase payload limit for base64 audio chunks & images
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
