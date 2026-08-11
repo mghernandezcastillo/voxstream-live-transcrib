@@ -1,0 +1,11 @@
+{
+  "name": "Remix voxstream-live-transcriber v2",
+  "description": "Imported from GitHub: mghernandezcastillo/voxstream-live-transcriber",
+  "requestFramePermissions": [
+    "microphone",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
