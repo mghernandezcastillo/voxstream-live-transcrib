@@ -1976,11 +1976,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   };
 
   const handleClearAll = () => {
-    if (window.confirm("¿Seguro que deseas borrar toda la transcripción actual?")) {
-      setSegments([]);
-      setSummary(null);
-      setRecordingDurationMs(0);
-    }
+    setSegments([]);
+    setSummary(null);
+    setRecordingDurationMs(0);
   };
 
   const toggleFullscreen = async () => {

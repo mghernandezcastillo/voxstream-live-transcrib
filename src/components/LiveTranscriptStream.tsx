@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { TranscriptSegment, Settings } from "../types";
 import {
+  WordTranslationPopover,
+  type TranslationLanguage,
+  type WordTranslationSelection,
+} from "./WordTranslationPopover";
+import {
+  AlertTriangle,
   ArrowDown,
   BookOpen,
   Check,
@@ -48,6 +54,8 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   const [showTranslatedOnly, setShowTranslatedOnly] = useState(false);
   const [isFollowingLive, setIsFollowingLive] = useState(true);
   const [showDetailedHistory, setShowDetailedHistory] = useState(false);
+  const [showClearConfirmation, setShowClearConfirmation] = useState(false);
+  const [wordTranslation, setWordTranslation] = useState<WordTranslationSelection | null>(null);
 
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredSegments = segments.filter(
@@ -117,6 +125,68 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
     setEditingId(null);
   };
 
+  const getTextLanguage = (segment: TranscriptSegment, translated = false): TranslationLanguage => {
+    if (translated) {
+      return settings.targetLanguage.toLocaleLowerCase().includes("ingl") ? "en" : "es";
+    }
+
+    const segmentLanguage = String(segment.language || "").toLocaleLowerCase();
+    if (segmentLanguage.includes("españ") || segmentLanguage.includes("spanish")) return "es";
+    if (segmentLanguage.includes("ingl") || segmentLanguage.includes("english")) return "en";
+    return settings.inputLanguage === "spanish" ? "es" : "en";
+  };
+
+  const openWordTranslation = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    word: string,
+    sourceLanguage: TranslationLanguage,
+  ) => {
+    event.stopPropagation();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setWordTranslation({
+      word,
+      sourceLanguage,
+      targetLanguage: sourceLanguage === "en" ? "es" : "en",
+      anchor: {
+        centerX: bounds.left + bounds.width / 2,
+        top: bounds.top,
+        bottom: bounds.bottom,
+      },
+    });
+  };
+
+  const renderInteractiveText = (text: string, sourceLanguage: TranslationLanguage) => {
+    const tokens = text.split(/(\p{L}+(?:['’\-]\p{L}+)*)/gu);
+    return tokens.map((token, index) => {
+      if (!/^[\p{L}]+(?:['’\-][\p{L}]+)*$/u.test(token)) {
+        return <React.Fragment key={`${index}-${token}`}>{token}</React.Fragment>;
+      }
+
+      return (
+        <button
+          key={`${index}-${token}`}
+          type="button"
+          onClick={(event) => openWordTranslation(event, token, sourceLanguage)}
+          className="inline rounded-[0.2em] px-[0.04em] align-baseline [font:inherit] [line-height:inherit] text-inherit transition hover:bg-cyan-300/15 hover:text-cyan-200 focus-visible:bg-cyan-300/15 focus-visible:text-cyan-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-300/60"
+          title={`Traducir “${token}”`}
+        >
+          {token}
+        </button>
+      );
+    });
+  };
+
+  const clearRepeatText = () => {
+    setWordTranslation(null);
+    onClearAll();
+  };
+
+  const confirmClearTranscript = () => {
+    setShowClearConfirmation(false);
+    setShowDetailedHistory(false);
+    clearRepeatText();
+  };
+
   const getDetailedHistoryFontSizeClass = () => {
     switch (settings.fontSize) {
       case "sm":
@@ -174,7 +244,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
               live ? "leading-[1.22] text-balance" : ""
             }`}
           >
-            {segment.text}
+            {renderInteractiveText(segment.text, getTextLanguage(segment))}
           </p>
         )}
 
@@ -184,7 +254,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
               <span className="not-italic text-[10px] font-bold text-cyan-300 uppercase mr-2 bg-cyan-400/10 px-2 py-0.5 rounded-md border border-cyan-400/20">
                 {settings.targetLanguage}
               </span>
-              {segment.translatedText}
+              {renderInteractiveText(segment.translatedText, getTextLanguage(segment, true))}
             </p>
           </div>
         )}
@@ -250,7 +320,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
           </button>
 
           <button
-            onClick={onClearAll}
+            onClick={() => setShowClearConfirmation(true)}
             disabled={segments.length === 0}
             className="flex items-center gap-1 rounded-xl border border-rose-500/20 bg-rose-500/10 px-2.5 py-1.5 text-xs font-semibold text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-30"
             title="Limpiar transcripción"
@@ -337,9 +407,21 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
             <BookOpen size={14} className="text-cyan-400" />
             <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-slate-300">Texto para repetir</h3>
           </div>
-          <span className="text-[10px] text-slate-500">
-            {segments.length > 0 ? `${segments.length} frases unidas` : "Se formará mientras escuchas"}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-[10px] text-slate-500 sm:inline">
+              {segments.length > 0 ? `${segments.length} frases unidas` : "Se formará mientras escuchas"}
+            </span>
+            <button
+              type="button"
+              onClick={clearRepeatText}
+              disabled={segments.length === 0}
+              className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-semibold text-slate-400 transition hover:border-rose-400/30 hover:bg-rose-400/10 hover:text-rose-300 disabled:opacity-30"
+              title="Limpiar texto para repetir sin confirmación"
+            >
+              <Trash2 size={11} />
+              Limpiar
+            </button>
+          </div>
         </div>
 
         <div className="relative min-h-0 flex-1">
@@ -372,7 +454,10 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
                             isNewest && isRecording ? "text-cyan-300" : "text-slate-100"
                           }`}
                         >
-                          {displayedText}
+                          {renderInteractiveText(
+                            displayedText,
+                            getTextLanguage(segment, Boolean(showTranslatedOnly && segment.translatedText)),
+                          )}
                         </span>
                         {index < segments.length - 1 ? " " : ""}
                       </React.Fragment>
@@ -539,6 +624,55 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
           </div>
         </div>
       )}
+
+      {showClearConfirmation && (
+        <div
+          className="absolute inset-0 z-[80] flex items-center justify-center bg-slate-950/85 p-5 backdrop-blur-md"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="clear-transcript-title"
+          onMouseDown={() => setShowClearConfirmation(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-rose-400/20 bg-slate-950 p-5 shadow-2xl"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl border border-rose-400/20 bg-rose-400/10 p-2.5 text-rose-300">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 id="clear-transcript-title" className="font-bold text-white">¿Limpiar la transcripción?</h3>
+                <p className="mt-1 text-sm leading-relaxed text-slate-400">
+                  Se borrarán la transcripción en vivo y el texto acumulado para repetir.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirmation(false)}
+                className="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/10"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearTranscript}
+                className="flex items-center gap-1.5 rounded-xl bg-rose-500 px-4 py-2 text-sm font-bold text-white transition hover:bg-rose-400"
+              >
+                <Trash2 size={14} />
+                Limpiar todo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <WordTranslationPopover
+        selection={wordTranslation}
+        onClose={() => setWordTranslation(null)}
+      />
     </div>
   );
 };

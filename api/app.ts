@@ -2,6 +2,9 @@ import express from "express";
 
 const app = express();
 
+const wordTranslationCache = new Map<string, { translatedText: string; expiresAt: number }>();
+const WORD_TRANSLATION_CACHE_MS = 24 * 60 * 60 * 1_000;
+
 // ONNX Runtime Web needs SharedArrayBuffer to use multiple WASM threads.
 // Without cross-origin isolation, Whisper silently falls back to a much slower
 // single-threaded path on PCs without WebGPU.
@@ -475,6 +478,72 @@ Responde de forma clara, directa y concisa a la consulta del usuario basándote 
     console.error("[SERVER /api/fast-vision-query ERROR]", error?.message || error);
     const apiError = getGeminiHttpError(error);
     return res.status(apiError.status).json(apiError);
+  }
+});
+
+// Fast, keyless translation for individual English/Spanish words. Only the
+// selected word leaves the app, and results are cached to avoid repeated calls.
+app.post("/api/translate-word", async (req, res) => {
+  const word = String(req.body?.word || "").normalize("NFC").trim();
+  const sourceLanguage = String(req.body?.sourceLanguage || "").toLowerCase();
+  const targetLanguage = String(req.body?.targetLanguage || "").toLowerCase();
+
+  if (!word || word.length > 80 || !/^[\p{L}]+(?:['’\-][\p{L}]+)*$/u.test(word)) {
+    return res.status(400).json({ error: "Selecciona una sola palabra válida." });
+  }
+  if (!(["en", "es"].includes(sourceLanguage) && ["en", "es"].includes(targetLanguage))) {
+    return res.status(400).json({ error: "Solo se admite traducción entre inglés y español." });
+  }
+  if (sourceLanguage === targetLanguage) {
+    return res.json({ translatedText: word, cached: true });
+  }
+
+  const cacheKey = `${sourceLanguage}:${targetLanguage}:${word.toLocaleLowerCase()}`;
+  const cached = wordTranslationCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return res.json({ translatedText: cached.translatedText, cached: true });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6_000);
+  try {
+    const query = new URLSearchParams({
+      client: "gtx",
+      sl: sourceLanguage,
+      tl: targetLanguage,
+      dt: "t",
+      q: word,
+    });
+    const providerResponse = await fetch(`https://translate.googleapis.com/translate_a/single?${query}`, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+    });
+    const payload = await providerResponse.json().catch(() => []) as unknown;
+    const translationParts = Array.isArray(payload) && Array.isArray(payload[0]) ? payload[0] : [];
+    const translatedText = translationParts
+      .map((part) => Array.isArray(part) ? String(part[0] || "") : "")
+      .join("")
+      .trim();
+
+    if (!providerResponse.ok || !translatedText) {
+      throw new Error("El servicio de traducción no respondió.");
+    }
+
+    wordTranslationCache.set(cacheKey, {
+      translatedText,
+      expiresAt: Date.now() + WORD_TRANSLATION_CACHE_MS,
+    });
+    return res.json({ translatedText, cached: false });
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    console.error("[SERVER /api/translate-word ERROR]", error instanceof Error ? error.message : error);
+    return res.status(502).json({
+      error: timedOut
+        ? "La traducción tardó demasiado. Inténtalo otra vez."
+        : "La traducción gratuita no está disponible en este momento.",
+    });
+  } finally {
+    clearTimeout(timeout);
   }
 });
 
