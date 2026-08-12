@@ -6,6 +6,7 @@ export interface LocalAudioChunk {
   sampleRate: number;
   language: TranscriptionLanguage;
   sessionId: number;
+  capturedAtMs: number;
 }
 
 export interface AudioLevel {

@@ -63,7 +63,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
             {settings.aiEngine === "moonshine" && (
               <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
-                Local, sin API key y con actualizaciones cada 0,5 s. Whisper se conserva como respaldo.
+                Local y sin API key. Inglés usa Tiny Streaming; Whisper se conserva como respaldo.
               </p>
             )}
             {settings.aiEngine === "cloud" && (
@@ -108,7 +108,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             >
               <option value="auto">Automático ES/EN (detección inicial)</option>
               <option value="english">
-                {settings.aiEngine === "moonshine" ? "Solo inglés (Small/Tiny Streaming)" : "Inglés fijo"}
+                {settings.aiEngine === "moonshine" ? "Solo inglés (Tiny Streaming, menor latencia)" : "Inglés fijo"}
               </option>
               <option value="spanish">
                 {settings.aiEngine === "moonshine" ? "Solo español (Base Spanish)" : "Español fijo"}
@@ -116,7 +116,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </select>
             <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
               {settings.aiEngine === "moonshine"
-                ? "Los modos fijos comienzan antes. Automático usa Whisper una sola vez y luego cambia a Moonshine."
+                ? "Los modos fijos comienzan antes. Automático usa Whisper una sola vez. Español usa Base porque Moonshine aún no ofrece español streaming."
                 : "Fijar el idioma evita el coste de detección automática."}
             </p>
           </div>

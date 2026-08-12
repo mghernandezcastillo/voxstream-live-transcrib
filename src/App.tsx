@@ -20,6 +20,11 @@ import {
   detectEnglishOrSpanish,
   type OptimizedLanguage,
 } from "./utils/languageDetection";
+import {
+  getEndToEndLatencyMs,
+  getMoonshineBatchDurationSec,
+  MOONSHINE_CAPTURE_CHUNK_SEC,
+} from "./utils/moonshineRuntime";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { TabShareGuideModal } from "./components/TabShareGuideModal";
 import { LiveTranscriptStream } from "./components/LiveTranscriptStream";
@@ -53,7 +58,6 @@ const MAX_INFERENCE_AUDIO_SEC = 15;
 const MAX_BUFFERED_AUDIO_SEC = 90;
 const WEBGPU_INFERENCE_TIMEOUT_MS = 45_000;
 const WASM_INFERENCE_TIMEOUT_MS = 120_000;
-const MOONSHINE_CHUNK_DURATION_SEC = 0.5;
 const AUTO_LANGUAGE_PROBE_SEC = 3;
 const WHISPER_STARTUP_PROGRESS_END = 25;
 
@@ -81,6 +85,8 @@ export default function App() {
   const [downloadStatus, setDownloadStatus] = useState("");
   const [runtimeEngine, setRuntimeEngine] = useState<RuntimeEngine>("moonshine");
   const [detectedLanguage, setDetectedLanguage] = useState<OptimizedLanguage | null>(null);
+  const [moonshineModelName, setMoonshineModelName] = useState<"tiny-streaming" | "base" | null>(null);
+  const [moonshineStreamLagMs, setMoonshineStreamLagMs] = useState<number | null>(null);
 
   // Modals
   const [showGuideModal, setShowGuideModal] = useState(false);
@@ -462,6 +468,8 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineWorkerBusyRef.current = false;
     moonshineWorkerLanguageRef.current = null;
     moonshineActiveChunkRef.current = null;
+    setMoonshineModelName(null);
+    setMoonshineStreamLagMs(null);
   };
 
   const completeStartupPreload = (status: string) => {
@@ -568,12 +576,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         failPreload(event.message || "el worker de precarga no pudo arrancar");
       };
 
-      const logicalCores = Number(navigator.hardwareConcurrency) || 1;
-      const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
-      const englishModel = logicalCores <= 4 || (deviceMemory > 0 && deviceMemory <= 4)
-        ? "tiny"
-        : "small";
-      worker.postMessage({ type: "preload", englishModel });
+      worker.postMessage({ type: "preload" });
     } catch (error) {
       failPreload(error instanceof Error ? error.message : String(error));
     }
@@ -594,7 +597,14 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineAudioQueueRef.current = moonshineAudioQueueRef.current.filter(
       (chunk) => chunk.sessionId === localSessionIdRef.current,
     );
-    const nextChunk = moonshineAudioQueueRef.current.shift();
+    const activeLanguage = moonshineWorkerLanguageRef.current;
+    if (!activeLanguage) return;
+    const queuedDurationSec = getQueueDurationSec(moonshineAudioQueueRef.current);
+    const maxBatchDurationSec = getMoonshineBatchDurationSec(activeLanguage, queuedDurationSec);
+    const nextChunk = takeCoalescedChunk(
+      moonshineAudioQueueRef.current,
+      maxBatchDurationSec,
+    );
     if (!nextChunk) {
       setIsProcessingChunk(false);
       return;
@@ -715,15 +725,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           return;
         }
 
-        if (data?.type === "model-fallback") {
-          setDownloadProgress(0);
-          setDownloadStatus("El modelo inglés Small no fue compatible; cargando Tiny Streaming...");
-          console.warn("[VoxStream Moonshine] Cambio a Tiny Streaming:", data.message);
-          return;
-        }
-
         if (data?.type === "ready") {
           moonshineWorkerReadyRef.current = true;
+          setMoonshineModelName(data.model === "tiny-streaming" ? "tiny-streaming" : "base");
           setLocalEngineStatus("ready");
           setLocalEngineBackend("wasm");
           setDownloadProgress(100);
@@ -761,10 +765,16 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           moonshineWorkerBusyRef.current = false;
           const processingMs = Number(data.processingMs || 0);
           const audioDurationSec = Number(data.audioDurationSec || 0);
-          if (processingMs > 0) {
+          const didTranscribe = data.didTranscribe === true;
+          const streamLagMs = activeChunk
+            ? getEndToEndLatencyMs(activeChunk.capturedAtMs)
+            : 0;
+          const queuedDurationSec = getQueueDurationSec(moonshineAudioQueueRef.current);
+          if (didTranscribe && streamLagMs > 0) setMoonshineStreamLagMs(streamLagMs);
+          if (didTranscribe && processingMs > 0) {
             setLastInferenceLatencyMs(processingMs);
             console.log(
-              `[VoxStream Latency] moonshine-${String(data.language)}: ${(processingMs / 1000).toFixed(2)} s para ${audioDurationSec.toFixed(2)} s de audio.`,
+              `[VoxStream Latency] moonshine-${String(data.language)}: proceso ${(processingMs / 1000).toFixed(2)} s para ${audioDurationSec.toFixed(2)} s de audio; atraso extremo a extremo ${(streamLagMs / 1000).toFixed(2)} s; cola ${queuedDurationSec.toFixed(2)} s.`,
             );
           }
           drainMoonshineAudioQueue();
@@ -793,12 +803,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         fallbackMoonshineToWhisper("el navegador no pudo leer un mensaje del worker");
       };
 
-      const logicalCores = Number(navigator.hardwareConcurrency) || 1;
-      const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
-      const englishModel = logicalCores <= 4 || (deviceMemory > 0 && deviceMemory <= 4)
-        ? "tiny"
-        : "small";
-      worker.postMessage({ type: "load", language, englishModel });
+      worker.postMessage({ type: "load", language });
     } catch (error) {
       fallbackMoonshineToWhisper(error instanceof Error ? error.message : String(error));
     }
@@ -1344,6 +1349,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       sampleRate,
       language: settingsRef.current.inputLanguage,
       sessionId: localSessionIdRef.current,
+      capturedAtMs: Date.now(),
     };
 
     if (activeRuntimeEngineRef.current === "cloud") {
@@ -1425,6 +1431,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       localSessionIdRef.current += 1;
       localWebGpuSlowResultsRef.current = 0;
       setLastInferenceLatencyMs(null);
+      setMoonshineStreamLagMs(null);
       startTimeRef.current = Date.now();
       setTranscriptionState("recording");
       if (selectedEngine === "local") {
@@ -1483,7 +1490,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           if (!ctx.audioWorklet) throw new Error("AudioWorklet no disponible");
           await ctx.audioWorklet.addModule("/pcm-capture-worklet.js?v=3");
           const captureChunkDuration = activeRuntimeEngineRef.current === "moonshine"
-            ? MOONSHINE_CHUNK_DURATION_SEC
+            ? MOONSHINE_CAPTURE_CHUNK_SEC
             : settingsRef.current.chunkDurationSec;
           const worklet = new AudioWorkletNode(ctx, "voxstream-pcm-capture", {
             numberOfInputs: 1,
@@ -1519,7 +1526,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
         if (!usingAudioWorklet) {
           const intervalMs = (activeRuntimeEngineRef.current === "moonshine"
-            ? MOONSHINE_CHUNK_DURATION_SEC
+            ? MOONSHINE_CAPTURE_CHUNK_SEC
             : settingsRef.current.chunkDurationSec) * 1000;
           chunkIntervalRef.current = window.setInterval(() => {
             if (!isRecordingRef.current || pcmBuffers.length === 0) return;
@@ -2195,7 +2202,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
                           : "Cargando Whisper..."
                       : localEngineStatus === "ready"
                         ? runtimeEngine === "moonshine"
-                          ? `Moonshine ${detectedLanguage === "spanish" || activeInputLanguageRef.current === "spanish" ? "ES" : "EN"}${lastInferenceLatencyMs ? ` · ${lastInferenceLatencyMs < 1000 ? `${Math.round(lastInferenceLatencyMs)} ms` : `${(lastInferenceLatencyMs / 1000).toFixed(1)} s`}` : ""}`
+                          ? `Moonshine ${detectedLanguage === "spanish" || activeInputLanguageRef.current === "spanish" ? "ES Base" : `EN ${moonshineModelName === "tiny-streaming" ? "Tiny" : "Streaming"}`}${moonshineStreamLagMs ? ` · atraso ${(moonshineStreamLagMs / 1000).toFixed(1)} s` : ""}`
                           : `Whisper local${localEngineBackend ? ` (${localEngineBackend.toUpperCase()})` : ""}${lastInferenceLatencyMs ? ` · ${(lastInferenceLatencyMs / 1000).toFixed(1)} s` : ""}`
                         : localEngineStatus === "error"
                           ? `${runtimeEngine === "moonshine" ? "Moonshine" : "Whisper"} requiere reinicio`

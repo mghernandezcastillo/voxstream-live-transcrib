@@ -1,15 +1,23 @@
 import type {
   Transcriber as MoonshineTranscriber,
   Stream,
+  Transcript,
   TranscriptEventListener,
   TranscriptLine,
 } from "@moonshine-ai/moonshine-wasm";
+import {
+  getMoonshineModelProfile,
+  MOONSHINE_MAX_LINE_DURATION_SEC,
+  MOONSHINE_UPDATE_INTERVAL_SEC,
+} from "../utils/moonshineRuntime";
 
 type MoonshineLanguage = "english" | "spanish";
 
 let transcriber: MoonshineTranscriber | null = null;
 let stream: Stream | null = null;
 let loadedLanguage: MoonshineLanguage | null = null;
+let loadedModelName: "tiny-streaming" | "base" | null = null;
+let lastTranscriptSnapshot: Transcript | null = null;
 let activeSessionId = 0;
 let commandChain = Promise.resolve();
 let moonshineModulePromise: Promise<typeof import("@moonshine-ai/moonshine-wasm")> | null = null;
@@ -42,6 +50,7 @@ function closeStream() {
     // The worker is about to replace or close this stream anyway.
   }
   stream = null;
+  lastTranscriptSnapshot = null;
 }
 
 async function getMoonshineModule() {
@@ -82,15 +91,15 @@ function startSession(sessionId: number) {
     },
   };
 
-  stream = transcriber.createStream({ updateInterval: 0.5 });
+  stream = transcriber.createStream({ updateInterval: MOONSHINE_UPDATE_INTERVAL_SEC });
   stream.addListener(listener);
   stream.start();
   post("session-ready", { sessionId });
 }
 
-async function load(language: MoonshineLanguage, preferredEnglishModel?: "small" | "tiny") {
+async function load(language: MoonshineLanguage) {
   if (transcriber && loadedLanguage === language) {
-    post("ready", { model: language === "english" ? "small-streaming" : "base" });
+    post("ready", { model: loadedModelName });
     return;
   }
 
@@ -98,51 +107,39 @@ async function load(language: MoonshineLanguage, preferredEnglishModel?: "small"
   transcriber?.close();
   transcriber = null;
   loadedLanguage = language;
+  const modelProfile = getMoonshineModelProfile(language);
+  loadedModelName = modelProfile.model;
 
   const { ModelArch, Transcriber } = await getMoonshineModule();
 
-  const logicalCores = Number(navigator.hardwareConcurrency) || 1;
-  const deviceMemory = Number((navigator as Navigator & { deviceMemory?: number }).deviceMemory) || 0;
-  const prefersTiny = language === "english" && (
-    preferredEnglishModel === "tiny" ||
-    (!preferredEnglishModel && (logicalCores <= 4 || (deviceMemory > 0 && deviceMemory <= 4)))
-  );
-  let modelArch = language === "english"
-    ? prefersTiny ? ModelArch.TinyStreaming : ModelArch.SmallStreaming
+  const modelArch = modelProfile.model === "tiny-streaming"
+    ? ModelArch.TinyStreaming
     : ModelArch.Base;
-  let modelName = language === "english"
-    ? prefersTiny ? "tiny-streaming" : "small-streaming"
-    : "base";
 
   const loadModel = (arch: Parameters<typeof Transcriber.load>[0]["modelArch"]) => Transcriber.load({
     language: language === "english" ? "en" : "es",
     modelArch: arch,
+    options: {
+      transcription_interval: String(MOONSHINE_UPDATE_INTERVAL_SEC),
+      vad_window_duration: "0.3",
+      vad_max_segment_duration: String(MOONSHINE_MAX_LINE_DURATION_SEC),
+      return_audio_data: "false",
+    },
     onProgress: (loaded, total, file) => {
       post("progress", { loaded, total, file });
     },
   });
 
-  try {
-    transcriber = await loadModel(modelArch);
-  } catch (error) {
-    if (language !== "english" || modelArch === ModelArch.TinyStreaming) throw error;
-    post("model-fallback", {
-      failedModel: modelName,
-      message: error instanceof Error ? error.message : String(error),
-    });
-    modelArch = ModelArch.TinyStreaming;
-    modelName = "tiny-streaming";
-    transcriber = await loadModel(modelArch);
-  }
+  transcriber = await loadModel(modelArch);
 
-  post("ready", { model: modelName });
+  post("ready", { model: loadedModelName });
 }
 
 async function handleMessage(event: MessageEvent) {
-  const { type, language, sessionId, audio, sampleRate, englishModel } = event.data || {};
+  const { type, language, sessionId, audio, sampleRate } = event.data || {};
 
   if (type === "load") {
-    await load(language as MoonshineLanguage, englishModel);
+    await load(language as MoonshineLanguage);
     return;
   }
 
@@ -163,12 +160,15 @@ async function handleMessage(event: MessageEvent) {
 
     const startedAt = performance.now();
     stream.addAudio(audio, Number(sampleRate) || 16_000);
-    stream.transcribe();
+    const transcript = stream.transcribe();
+    const didTranscribe = transcript !== lastTranscriptSnapshot;
+    lastTranscriptSnapshot = transcript;
     post("audio-processed", {
       sessionId: activeSessionId,
       id: event.data?.id,
       processingMs: Math.round(performance.now() - startedAt),
       audioDurationSec: audio.length / (Number(sampleRate) || 16_000),
+      didTranscribe,
     });
     return;
   }
@@ -187,6 +187,7 @@ async function handleMessage(event: MessageEvent) {
     transcriber?.close();
     transcriber = null;
     loadedLanguage = null;
+    loadedModelName = null;
   }
 }
 

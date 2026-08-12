@@ -16,6 +16,7 @@ function chunk(id: string, seconds: number, value: number, sampleRate = 10): Loc
     sampleRate,
     language: "spanish",
     sessionId: 1,
+    capturedAtMs: 1_000,
   };
 }
 

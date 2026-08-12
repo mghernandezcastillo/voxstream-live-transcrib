@@ -1,4 +1,4 @@
-type EnglishModel = "small" | "tiny";
+import { getMoonshineModelProfile } from "../utils/moonshineRuntime";
 
 type ManifestFile = { name?: string; size?: number; url?: string };
 type ManifestGroup = { base_url?: string; files?: ManifestFile[] };
@@ -38,7 +38,7 @@ async function isManifestCached(manifestJson: string) {
   return matches.every(Boolean);
 }
 
-async function preload(englishModel: EnglishModel) {
+async function preload() {
   if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
     throw new Error("Moonshine requiere aislamiento COOP/COEP para preparar sus modelos.");
   }
@@ -48,12 +48,15 @@ async function preload(englishModel: EnglishModel) {
     "@moonshine-ai/moonshine-wasm"
   );
   const module = await loadMoonshineModule();
+  const englishProfile = getMoonshineModelProfile("english");
 
   const models = [
     {
       language: "en",
-      label: englishModel === "tiny" ? "Moonshine Inglés Tiny" : "Moonshine Inglés Small",
-      arch: englishModel === "tiny" ? ModelArch.TinyStreaming : ModelArch.SmallStreaming,
+      label: `Moonshine Inglés ${englishProfile.shortLabel}`,
+      arch: englishProfile.model === "tiny-streaming"
+        ? ModelArch.TinyStreaming
+        : ModelArch.SmallStreaming,
     },
     {
       language: "es",
@@ -109,7 +112,6 @@ async function preload(englishModel: EnglishModel) {
   }
 
   post("ready", {
-    englishModel,
     totalBytes,
     models: manifests.map((manifest) => manifest.label),
   });
@@ -117,7 +119,7 @@ async function preload(englishModel: EnglishModel) {
 
 self.addEventListener("message", ({ data }) => {
   if (data?.type !== "preload") return;
-  preload(data.englishModel === "tiny" ? "tiny" : "small").catch((error) => {
+  preload().catch((error) => {
     post("error", {
       message: error instanceof Error ? error.message : String(error),
     });
