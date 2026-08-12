@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
   Zap,
-  Camera,
   X,
   Sparkles,
   Copy,
@@ -33,17 +32,20 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
   videoRef,
   stream,
 }) => {
-  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
   const [customPrompt, setCustomPrompt] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [answer, setAnswer] = useState<string | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
-  const [activeMode, setActiveMode] = useState<"fast_answer" | "explain" | "custom">("fast_answer");
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const livePreviewVideoRef = useRef<HTMLVideoElement | null>(null);
 
   // Capture current video frame and downscale to max 800px width (JPEG 0.6 quality)
   const captureSnapshot = (): string | null => {
-    const video = videoRef.current;
+    const livePreview = livePreviewVideoRef.current;
+    const video =
+      livePreview && livePreview.videoWidth > 0 && livePreview.videoHeight > 0
+        ? livePreview
+        : videoRef.current;
     if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
       return null;
     }
@@ -81,7 +83,6 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
     mode: "fast_answer" | "explain" | "custom",
     overridePrompt?: string
   ) => {
-    setActiveMode(mode);
     setLoading(true);
     setAnswer(null);
 
@@ -91,8 +92,6 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
       setLoading(false);
       return;
     }
-
-    setSnapshotUrl(imgBase64);
 
     try {
       const promptToSend =
@@ -126,13 +125,33 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
     }
   };
 
-  // Auto-take snapshot when opening modal if stream exists
+  // Reuse the active capture stream for a native, continuously updated preview.
+  // The stream is muted here to avoid duplicating the shared tab audio.
   useEffect(() => {
-    if (isOpen) {
-      const img = captureSnapshot();
-      if (img) setSnapshotUrl(img);
+    if (!isOpen || !stream) return;
+
+    const preview = livePreviewVideoRef.current;
+    if (!preview) return;
+
+    preview.srcObject = stream;
+    const startPlayback = () => {
+      void preview.play().catch((error) => {
+        console.warn("No se pudo iniciar la vista previa en vivo:", error);
+      });
+    };
+
+    if (preview.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      startPlayback();
+    } else {
+      preview.addEventListener("loadedmetadata", startPlayback, { once: true });
     }
-  }, [isOpen]);
+
+    return () => {
+      preview.removeEventListener("loadedmetadata", startPlayback);
+      preview.pause();
+      if (preview.srcObject === stream) preview.srcObject = null;
+    };
+  }, [isOpen, stream]);
 
   const handleCopy = () => {
     if (answer) {
@@ -209,43 +228,41 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
             </div>
           </button>
 
-          <button
-            onClick={() => {
-              const img = captureSnapshot();
-              if (img) setSnapshotUrl(img);
-            }}
-            disabled={loading}
-            className="p-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-xl flex items-center gap-2.5 text-left text-slate-100 transition group backdrop-blur-md"
+          <div
+            className="p-3 bg-emerald-500/5 border border-emerald-400/20 rounded-xl flex items-center gap-2.5 text-left text-slate-100 backdrop-blur-md"
           >
-            <div className="p-2 rounded-lg bg-slate-800 text-slate-300 group-hover:scale-105 transition-transform">
-              <Camera size={16} />
+            <div className="p-2 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-400/20">
+              <Eye size={16} />
             </div>
             <div>
-              <div className="text-xs font-bold text-slate-200">📸 Nueva Captura</div>
-              <div className="text-[10px] text-slate-400">Refrescar fotograma en vivo</div>
+              <div className="text-xs font-bold text-emerald-300">● Vista en vivo</div>
+              <div className="text-[10px] text-slate-400">Actualización automática</div>
             </div>
-          </button>
+          </div>
         </div>
 
         {/* Content Body: Image Thumbnail & Answer Output */}
         <div className="flex-1 overflow-y-auto space-y-4 pr-1">
-          {/* Screenshot Preview */}
+          {/* Continuously updated stream preview */}
           <div className="relative bg-slate-950/80 rounded-xl border border-white/10 overflow-hidden min-h-[140px] max-h-[220px] flex items-center justify-center">
-            {snapshotUrl ? (
-              <img
-                src={snapshotUrl}
-                alt="Captura de pantalla"
+            {stream ? (
+              <video
+                ref={livePreviewVideoRef}
+                autoPlay
+                muted
+                playsInline
+                aria-label="Vista previa en vivo de la pantalla compartida"
                 className="w-full h-full object-contain max-h-[200px]"
               />
             ) : (
               <div className="p-6 text-center text-slate-400 text-xs flex flex-col items-center gap-2">
                 <Eye size={24} className="text-slate-500" />
-                <span>Transmitiendo pestaña... Haz clic en "Resolver Pregunta" para capturar el cuadro actual.</span>
+                <span>No hay una pantalla compartida activa.</span>
               </div>
             )}
-            {snapshotUrl && (
+            {stream && (
               <div className="absolute top-2 right-2 bg-slate-950/80 backdrop-blur-md border border-white/10 text-[10px] font-mono text-cyan-300 px-2 py-0.5 rounded-md">
-                JPEG Compreso (~800px) • Ultra-Ligero
+                ● EN VIVO • Captura bajo demanda
               </div>
             )}
           </div>
