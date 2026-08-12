@@ -157,32 +157,11 @@ async function selectLanguage(language: MoonshineLanguage) {
   });
 }
 
-async function loadAll(preferredLanguage: MoonshineLanguage) {
-  const otherLanguage: MoonshineLanguage = preferredLanguage === "english" ? "spanish" : "english";
-  await loadModel(preferredLanguage);
-  await loadModel(otherLanguage);
-
-  closeStream();
-  transcriber = transcribers.get(preferredLanguage) || null;
-  loadedLanguage = preferredLanguage;
-  loadedModelName = getMoonshineModelProfile(preferredLanguage).model;
-  post("ready", {
-    model: loadedModelName,
-    allModelsReady: true,
-    models: ["english", "spanish"],
-  });
-}
-
 async function handleMessage(event: MessageEvent) {
   const { type, language, sessionId, audio, sampleRate } = event.data || {};
 
   if (type === "load") {
     await selectLanguage(language as MoonshineLanguage);
-    return;
-  }
-
-  if (type === "load-all") {
-    await loadAll(language as MoonshineLanguage);
     return;
   }
 

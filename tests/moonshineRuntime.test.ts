@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  areAllMoonshineLanguagesReady,
   getEndToEndLatencyMs,
   getMoonshineBatchDurationSec,
   getMoonshineModelProfile,
+  getOtherMoonshineLanguage,
   MOONSHINE_MAX_LINE_DURATION_SEC,
 } from "../src/utils/moonshineRuntime";
+
+test("requires both resident Moonshine languages before startup completes", () => {
+  assert.equal(areAllMoonshineLanguagesReady([]), false);
+  assert.equal(areAllMoonshineLanguagesReady(["english"]), false);
+  assert.equal(areAllMoonshineLanguagesReady(["spanish"]), false);
+  assert.equal(areAllMoonshineLanguagesReady(["english", "spanish"]), true);
+  assert.equal(getOtherMoonshineLanguage("english"), "spanish");
+  assert.equal(getOtherMoonshineLanguage("spanish"), "english");
+});
 
 test("uses Tiny Streaming for predictable English realtime performance", () => {
   assert.deepEqual(getMoonshineModelProfile("english"), {

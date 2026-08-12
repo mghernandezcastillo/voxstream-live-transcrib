@@ -3,6 +3,20 @@ import type { OptimizedLanguage } from "./languageDetection";
 export const MOONSHINE_CAPTURE_CHUNK_SEC = 0.5;
 export const MOONSHINE_UPDATE_INTERVAL_SEC = 0.5;
 export const MOONSHINE_MAX_LINE_DURATION_SEC = 6;
+export const MOONSHINE_LANGUAGES: readonly OptimizedLanguage[] = ["english", "spanish"];
+
+export function getOtherMoonshineLanguage(
+  language: OptimizedLanguage,
+): OptimizedLanguage {
+  return language === "english" ? "spanish" : "english";
+}
+
+export function areAllMoonshineLanguagesReady(
+  languages: Iterable<OptimizedLanguage>,
+) {
+  const readyLanguages = new Set(languages);
+  return MOONSHINE_LANGUAGES.every((language) => readyLanguages.has(language));
+}
 
 export interface MoonshineModelProfile {
   model: "tiny-streaming" | "base";
