@@ -60,6 +60,32 @@ const WEBGPU_INFERENCE_TIMEOUT_MS = 45_000;
 const WASM_INFERENCE_TIMEOUT_MS = 120_000;
 const AUTO_LANGUAGE_PROBE_SEC = 3;
 const WHISPER_STARTUP_PROGRESS_END = 25;
+const LAST_MOONSHINE_LANGUAGE_KEY = "voxstream:last-moonshine-language";
+
+const getPreferredMoonshineLanguage = (
+  selectedLanguage: Settings["inputLanguage"],
+): OptimizedLanguage => {
+  if (selectedLanguage === "english" || selectedLanguage === "spanish") {
+    return selectedLanguage;
+  }
+
+  try {
+    const stored = localStorage.getItem(LAST_MOONSHINE_LANGUAGE_KEY);
+    if (stored === "english" || stored === "spanish") return stored;
+  } catch {
+    // Storage can be unavailable in private/embedded browser contexts.
+  }
+
+  return navigator.language.toLowerCase().startsWith("en") ? "english" : "spanish";
+};
+
+const rememberMoonshineLanguage = (language: OptimizedLanguage) => {
+  try {
+    localStorage.setItem(LAST_MOONSHINE_LANGUAGE_KEY, language);
+  } catch {
+    // The in-memory selection still works when persistent storage is unavailable.
+  }
+};
 
 function formatModelBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
@@ -148,6 +174,8 @@ export default function App() {
   const moonshinePreloadWorkerRef = useRef<Worker | null>(null);
   const moonshinePreloadStartedRef = useRef(false);
   const moonshinePreloadRetriesRef = useRef(0);
+  const moonshineStartupWarmupRef = useRef(false);
+  const moonshineStartupLanguageRef = useRef<OptimizedLanguage | null>(null);
   const startupReadyRef = useRef(false);
   const startupCompletionTimeoutRef = useRef<number | null>(null);
   const startupRetryTimeoutRef = useRef<number | null>(null);
@@ -562,7 +590,16 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           console.log(
             `[VoxStream] Modelos Moonshine precargados: ${Array.isArray(data.models) ? data.models.join(", ") : "inglés y español"}.`,
           );
-          completeStartupPreload("3/3 · Whisper y Moonshine preparados");
+          const startupLanguage = getPreferredMoonshineLanguage(
+            settingsRef.current.inputLanguage,
+          );
+          moonshineStartupWarmupRef.current = true;
+          moonshineStartupLanguageRef.current = startupLanguage;
+          setDownloadProgress(99);
+          setDownloadStatus(
+            `3/3 · Inicializando Moonshine ${startupLanguage === "spanish" ? "Español" : "English"} en memoria...`,
+          );
+          ensureMoonshineWorker(startupLanguage);
           return;
         }
 
@@ -640,6 +677,21 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     });
   };
 
+  const completeMoonshineStartupWarmup = (language: OptimizedLanguage) => {
+    if (
+      !moonshineStartupWarmupRef.current ||
+      moonshineStartupLanguageRef.current !== language
+    ) {
+      return;
+    }
+
+    moonshineStartupWarmupRef.current = false;
+    moonshineStartupLanguageRef.current = null;
+    completeStartupPreload(
+      `3/3 · Moonshine ${language === "spanish" ? "Español" : "English"} listo para usar`,
+    );
+  };
+
   const fallbackMoonshineToWhisper = (reason: string) => {
     if (activeRuntimeEngineRef.current !== "moonshine") return;
 
@@ -661,6 +713,11 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     if (!isRecordingRef.current) {
       setLocalEngineStatus("error");
       setErrorMessage(`⚠️ Moonshine no pudo inicializarse: ${reason}`);
+      if (moonshineStartupWarmupRef.current) {
+        moonshineStartupWarmupRef.current = false;
+        moonshineStartupLanguageRef.current = null;
+        completeStartupPreload("Whisper preparado; Moonshine se reintentará al usarlo");
+      }
       return;
     }
 
@@ -685,6 +742,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       if (moonshineWorkerReadyRef.current) {
         setLocalEngineStatus("ready");
         setLocalEngineBackend("wasm");
+        completeMoonshineStartupWarmup(language);
         startMoonshineSessionIfReady();
       }
       return;
@@ -700,9 +758,13 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineWorkerLanguageRef.current = language;
     setLocalEngineStatus("loading");
     setLocalEngineBackend("wasm");
-    setDownloadProgress(0);
+    setDownloadProgress((previous) => (
+      moonshineStartupWarmupRef.current ? Math.max(previous, 99) : 0
+    ));
     setDownloadStatus(
-      `Cargando Moonshine ${language === "spanish" ? "Español" : "English"}...`,
+      moonshineStartupWarmupRef.current
+        ? `3/3 · Inicializando Moonshine ${language === "spanish" ? "Español" : "English"} en memoria...`
+        : `Cargando Moonshine ${language === "spanish" ? "Español" : "English"}...`,
     );
 
     try {
@@ -716,12 +778,32 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       worker.onmessage = ({ data }) => {
         if (generation !== moonshineWorkerGenerationRef.current) return;
 
+        if (data?.type === "load-start") {
+          const fromCache = data.source === "cache";
+          setDownloadStatus(
+            moonshineStartupWarmupRef.current
+              ? `3/3 · Inicializando Moonshine ${language === "spanish" ? "Español" : "English"} ${fromCache ? "desde caché" : "desde la red"}...`
+              : `${fromCache ? "Cargando Moonshine desde caché" : "Descargando Moonshine"}...`,
+          );
+          return;
+        }
+
         if (data?.type === "progress") {
           const loaded = Number(data.loaded || 0);
           const total = Number(data.total || 0);
           const file = String(data.file || "modelo");
-          if (total > 0) setDownloadProgress(Math.min(99, Math.round((loaded / total) * 100)));
-          setDownloadStatus(`Descargando Moonshine: ${file}`);
+          if (total > 0) {
+            const progress = Math.min(99, Math.round((loaded / total) * 100));
+            setDownloadProgress((previous) => (
+              moonshineStartupWarmupRef.current ? Math.max(previous, 99) : progress
+            ));
+          }
+          const fromCache = data.source === "cache";
+          setDownloadStatus(
+            moonshineStartupWarmupRef.current
+              ? `3/3 · Inicializando Moonshine desde ${fromCache ? "caché" : "la red"}: ${file}`
+              : `${fromCache ? "Cargando Moonshine desde caché" : "Descargando Moonshine"}: ${file}`,
+          );
           return;
         }
 
@@ -735,6 +817,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           console.log(
             `[VoxStream] Moonshine ${String(data.language)} listo (${String(data.model)}).`,
           );
+          completeMoonshineStartupWarmup(language);
           startMoonshineSessionIfReady();
           return;
         }
@@ -868,6 +951,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           : "spanish";
         const detection = detectEnglishOrSpanish(String(result?.text || ""), browserFallback);
         detectedLanguageRef.current = detection.language;
+        rememberMoonshineLanguage(detection.language);
         setDetectedLanguage(detection.language);
         setDownloadStatus(
           `Idioma detectado: ${detection.language === "spanish" ? "Español" : "English"}. Cargando Moonshine...`,
@@ -886,6 +970,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           ? "english"
           : "spanish";
         detectedLanguageRef.current = fallbackLanguage;
+        rememberMoonshineLanguage(fallbackLanguage);
         setDetectedLanguage(fallbackLanguage);
         setErrorMessage(
           `⚠️ No se pudo detectar el idioma automáticamente (${error instanceof Error ? error.message : String(error)}). Se usará ${fallbackLanguage === "spanish" ? "Español" : "English"} según el navegador.`,
@@ -954,6 +1039,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           ? "english"
           : "spanish";
         detectedLanguageRef.current = fallbackLanguage;
+        rememberMoonshineLanguage(fallbackLanguage);
         setDetectedLanguage(fallbackLanguage);
         setErrorMessage(
           `⚠️ Whisper no pudo detectar el idioma. Se usará ${fallbackLanguage === "spanish" ? "Español" : "English"} según el navegador.`,

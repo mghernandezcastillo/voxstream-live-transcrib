@@ -1,41 +1,11 @@
 import { getMoonshineModelProfile } from "../utils/moonshineRuntime";
-
-type ManifestFile = { name?: string; size?: number; url?: string };
-type ManifestGroup = { base_url?: string; files?: ManifestFile[] };
-type Manifest = { groups?: ManifestGroup[] };
+import {
+  getMoonshineManifestSize,
+  isMoonshineManifestCached,
+} from "../utils/moonshineCache";
 
 function post(type: string, data: Record<string, unknown> = {}) {
   self.postMessage({ type, ...data });
-}
-
-function manifestSize(manifestJson: string) {
-  const manifest = JSON.parse(manifestJson) as Manifest;
-  return (manifest.groups || []).reduce(
-    (groupTotal, group) => groupTotal + (group.files || []).reduce(
-      (fileTotal, file) => fileTotal + (Number(file.size) || 0),
-      0,
-    ),
-    0,
-  );
-}
-
-function joinUrl(base: string, file: string) {
-  return `${base.replace(/\/+$/, "")}/${file.replace(/^\/+/, "")}`;
-}
-
-async function isManifestCached(manifestJson: string) {
-  if (typeof caches === "undefined") return false;
-  const manifest = JSON.parse(manifestJson) as Manifest;
-  const urls = (manifest.groups || []).flatMap((group) =>
-    (group.files || []).map((file) =>
-      file.url || (group.base_url && file.name ? joinUrl(group.base_url, file.name) : ""),
-    ),
-  );
-  if (!urls.length || urls.some((url) => !url)) return false;
-
-  const cache = await caches.open("moonshine-models-v1");
-  const matches = await Promise.all(urls.map((url) => cache.match(url)));
-  return matches.every(Boolean);
 }
 
 async function preload() {
@@ -67,7 +37,7 @@ async function preload() {
 
   const manifests = models.map((model) => {
     const json = module.sttDependencies(model.language, String(model.arch), false);
-    return { ...model, json, bytes: manifestSize(json) };
+    return { ...model, json, bytes: getMoonshineManifestSize(json) };
   });
   const totalBytes = manifests.reduce((total, manifest) => total + manifest.bytes, 0);
   let completedBytes = 0;
@@ -75,7 +45,7 @@ async function preload() {
   for (const [index, manifest] of manifests.entries()) {
     const stage = index + 2;
     post("phase", { stage, label: `Verificando ${manifest.label}` });
-    if (await isManifestCached(manifest.json)) {
+    if (await isMoonshineManifestCached(manifest.json)) {
       completedBytes += manifest.bytes;
       post("progress", {
         stage,

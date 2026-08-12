@@ -10,6 +10,7 @@ import {
   MOONSHINE_MAX_LINE_DURATION_SEC,
   MOONSHINE_UPDATE_INTERVAL_SEC,
 } from "../utils/moonshineRuntime";
+import { isMoonshineManifestCached } from "../utils/moonshineCache";
 
 type MoonshineLanguage = "english" | "spanish";
 
@@ -110,15 +111,21 @@ async function load(language: MoonshineLanguage) {
   const modelProfile = getMoonshineModelProfile(language);
   loadedModelName = modelProfile.model;
 
-  const { ModelArch, Transcriber } = await getMoonshineModule();
+  const { ModelArch, Transcriber, loadMoonshineModule } = await getMoonshineModule();
 
   const modelArch = modelProfile.model === "tiny-streaming"
     ? ModelArch.TinyStreaming
     : ModelArch.Base;
+  const languageCode = language === "english" ? "en" : "es";
+  const module = await loadMoonshineModule();
+  const manifest = module.sttDependencies(languageCode, String(modelArch), false);
+  const source = await isMoonshineManifestCached(manifest) ? "cache" : "network";
+  post("load-start", { source, model: loadedModelName });
 
   const loadModel = (arch: Parameters<typeof Transcriber.load>[0]["modelArch"]) => Transcriber.load({
-    language: language === "english" ? "en" : "es",
+    language: languageCode,
     modelArch: arch,
+    module,
     options: {
       transcription_interval: String(MOONSHINE_UPDATE_INTERVAL_SEC),
       vad_window_duration: "0.3",
@@ -126,7 +133,7 @@ async function load(language: MoonshineLanguage) {
       return_audio_data: "false",
     },
     onProgress: (loaded, total, file) => {
-      post("progress", { loaded, total, file });
+      post("progress", { loaded, total, file, source });
     },
   });
 
