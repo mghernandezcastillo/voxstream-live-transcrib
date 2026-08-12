@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { TranscriptSegment, Settings } from "../types";
 import {
   ArrowDown,
+  BookOpen,
   Check,
   Clock,
   Copy,
@@ -14,6 +15,7 @@ import {
   Trash2,
   User,
   Volume2,
+  X,
 } from "lucide-react";
 
 interface LiveTranscriptStreamProps {
@@ -37,7 +39,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   isProcessingChunk,
   latencyMs,
 }) => {
-  const historyRef = useRef<HTMLDivElement | null>(null);
+  const repeatTextRef = useRef<HTMLDivElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -45,6 +47,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   const [editingText, setEditingText] = useState("");
   const [showTranslatedOnly, setShowTranslatedOnly] = useState(false);
   const [isFollowingLive, setIsFollowingLive] = useState(true);
+  const [showDetailedHistory, setShowDetailedHistory] = useState(false);
 
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredSegments = segments.filter(
@@ -54,34 +57,40 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
       segment.translatedText?.toLowerCase().includes(normalizedSearch),
   );
   const activeSegment = isRecording ? segments.at(-1) : undefined;
-  const historySegments = filteredSegments.filter(
-    (segment) => !activeSegment || segment.id !== activeSegment.id,
-  );
 
   useEffect(() => {
-    const history = historyRef.current;
-    if (!history) return;
+    const repeatText = repeatTextRef.current;
+    if (!repeatText) return;
 
     if (settings.autoScroll && isFollowingLive) {
-      history.scrollTop = history.scrollHeight;
+      repeatText.scrollTop = repeatText.scrollHeight;
       return;
     }
 
-    const distanceFromEnd = history.scrollHeight - history.scrollTop - history.clientHeight;
+    const distanceFromEnd = repeatText.scrollHeight - repeatText.scrollTop - repeatText.clientHeight;
     setIsFollowingLive(distanceFromEnd <= 72);
-  }, [historySegments.length, isRecording, searchQuery, settings.autoScroll]);
+  }, [segments, isRecording, settings.autoScroll]);
 
-  const handleHistoryScroll = () => {
-    const history = historyRef.current;
-    if (!history) return;
-    const distanceFromEnd = history.scrollHeight - history.scrollTop - history.clientHeight;
+  useEffect(() => {
+    if (!showDetailedHistory) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowDetailedHistory(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [showDetailedHistory]);
+
+  const handleRepeatTextScroll = () => {
+    const repeatText = repeatTextRef.current;
+    if (!repeatText) return;
+    const distanceFromEnd = repeatText.scrollHeight - repeatText.scrollTop - repeatText.clientHeight;
     setIsFollowingLive(distanceFromEnd <= 72);
   };
 
   const scrollToLatest = () => {
-    const history = historyRef.current;
-    if (!history) return;
-    history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+    const repeatText = repeatTextRef.current;
+    if (!repeatText) return;
+    repeatText.scrollTo({ top: repeatText.scrollHeight, behavior: "smooth" });
     setIsFollowingLive(true);
   };
 
@@ -92,7 +101,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   };
 
   const handleCopyAll = () => {
-    const fullText = segments.map((segment) => `[${segment.timestamp}] ${segment.text}`).join("\n");
+    const fullText = segments.map((segment) => segment.text).join(" ");
     navigator.clipboard.writeText(fullText);
     setCopiedAll(true);
     setTimeout(() => setCopiedAll(false), 2000);
@@ -108,7 +117,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
     setEditingId(null);
   };
 
-  const getHistoryFontSizeClass = () => {
+  const getDetailedHistoryFontSizeClass = () => {
     switch (settings.fontSize) {
       case "sm":
         return "text-sm leading-relaxed";
@@ -134,6 +143,19 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
     }
   };
 
+  const getRepeatFontSizeClass = () => {
+    switch (settings.fontSize) {
+      case "sm":
+        return "text-xl sm:text-2xl";
+      case "lg":
+        return "text-3xl sm:text-4xl";
+      case "xl":
+        return "text-4xl sm:text-5xl";
+      default:
+        return "text-2xl sm:text-3xl lg:text-[2rem]";
+    }
+  };
+
   const numericLatency = Number.isFinite(latencyMs) ? Math.max(0, Number(latencyMs)) : null;
   const latencySeconds = numericLatency === null ? null : numericLatency / 1000;
   const latencyTone = latencySeconds === null || latencySeconds < 2
@@ -143,7 +165,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
       : "border-orange-400/40 bg-orange-400/10 text-orange-300";
 
   const renderSegmentText = (segment: TranscriptSegment, live = false) => {
-    const fontClass = live ? getLiveFontSizeClass() : getHistoryFontSizeClass();
+    const fontClass = live ? getLiveFontSizeClass() : getDetailedHistoryFontSizeClass();
     return (
       <div className={live ? "space-y-3" : "space-y-2"}>
         {(!showTranslatedOnly || !segment.translatedText) && (
@@ -171,7 +193,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   };
 
   return (
-    <div className="flex h-[720px] min-h-[560px] max-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl">
+    <div className="relative flex h-[720px] min-h-[560px] max-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-white/5 p-4 backdrop-blur-md">
         <div className="flex items-center gap-2.5">
           <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-2 text-cyan-400">
@@ -194,16 +216,14 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Buscar..."
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              className="w-32 rounded-xl border border-white/10 bg-slate-950/60 py-1.5 pl-8 pr-3 text-xs text-slate-200 placeholder-slate-400 transition focus:border-cyan-400 focus:outline-none sm:w-44"
-            />
-          </div>
+          <button
+            onClick={() => setShowDetailedHistory(true)}
+            className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-400/30 hover:bg-white/10"
+            title="Abrir historial detallado"
+          >
+            <History size={14} className="text-cyan-400" />
+            <span>Historial</span>
+          </button>
 
           {settings.autoTranslate && (
             <button
@@ -295,7 +315,7 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
             </div>
             <div>
               <p className="font-semibold text-slate-100">Transcripción lista para revisar</p>
-              <p className="text-xs text-slate-400">Todo el contenido permanece disponible en el historial.</p>
+              <p className="text-xs text-slate-400">El texto completo está listo para leer y repetir.</p>
             </div>
           </div>
         ) : (
@@ -314,144 +334,211 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
       <div className="flex min-h-0 flex-1 flex-col bg-slate-950/25">
         <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-2.5 sm:px-6">
           <div className="flex items-center gap-2">
-            <History size={14} className="text-cyan-400" />
-            <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-slate-300">Historial completo</h3>
-            <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-slate-500">
-              {historySegments.length}
-            </span>
+            <BookOpen size={14} className="text-cyan-400" />
+            <h3 className="text-xs font-bold uppercase tracking-[0.12em] text-slate-300">Texto para repetir</h3>
           </div>
-          {isRecording && activeSegment && (
-            <span className="text-[10px] text-slate-500">La frase activa se añadirá al finalizar</span>
-          )}
+          <span className="text-[10px] text-slate-500">
+            {segments.length > 0 ? `${segments.length} frases unidas` : "Se formará mientras escuchas"}
+          </span>
         </div>
 
         <div className="relative min-h-0 flex-1">
           <div
-            ref={historyRef}
-            onScroll={handleHistoryScroll}
-            className="absolute inset-0 space-y-1 overflow-y-auto scroll-smooth px-3 py-3 sm:px-5 sm:py-4"
+            ref={repeatTextRef}
+            onScroll={handleRepeatTextScroll}
+            className="absolute inset-0 overflow-y-auto scroll-smooth px-5 py-6 sm:px-10 sm:py-8"
           >
-            {historySegments.length === 0 ? (
-              <div className="flex min-h-full items-center justify-center p-6 text-center">
-                <div>
-                  <History size={24} className="mx-auto mb-2 text-slate-600" />
-                  <p className="text-sm font-medium text-slate-400">
-                    {searchQuery
-                      ? `No hay resultados para “${searchQuery}”.`
-                      : isRecording
-                        ? "Las frases terminadas aparecerán aquí."
-                        : "Todavía no hay contenido transcrito."}
+            {segments.length === 0 ? (
+              <div className="flex min-h-full items-center justify-center text-center">
+                <div className="max-w-md">
+                  <BookOpen size={26} className="mx-auto mb-3 text-slate-600" />
+                  <p className="text-base font-medium text-slate-400">
+                    Aquí aparecerá todo el audio como un solo texto fácil de leer y repetir.
                   </p>
                 </div>
               </div>
             ) : (
-              historySegments.map((segment, index) => {
-                const isLatest = index === historySegments.length - 1;
-                return (
-                  <article
-                    key={segment.id}
-                    className={`group relative grid grid-cols-[auto_1fr] gap-3 rounded-xl border px-3 py-3 transition sm:gap-4 sm:px-4 ${
-                      isLatest && isRecording
-                        ? "border-cyan-400/20 bg-cyan-400/[0.06]"
-                        : "border-transparent hover:border-white/10 hover:bg-white/[0.04]"
-                    }`}
-                  >
-                    <div className="w-11 pt-0.5 text-right sm:w-14">
-                      {settings.showTimestamps ? (
-                        <span className="font-mono text-[10px] font-semibold text-cyan-400/70">
-                          {segment.timestamp}
+              <div className="mx-auto flex min-h-full max-w-4xl items-center justify-center">
+                <p className={`text-center font-semibold leading-[1.55] tracking-[-0.01em] text-slate-100 ${getRepeatFontSizeClass()}`}>
+                  {segments.map((segment, index) => {
+                    const displayedText = showTranslatedOnly && segment.translatedText
+                      ? segment.translatedText
+                      : segment.text;
+                    const isNewest = index === segments.length - 1;
+                    return (
+                      <React.Fragment key={segment.id}>
+                        <span
+                          className={`transition-colors duration-500 ${
+                            isNewest && isRecording ? "text-cyan-300" : "text-slate-100"
+                          }`}
+                        >
+                          {displayedText}
                         </span>
-                      ) : (
-                        <span className="font-mono text-[10px] text-slate-600">{index + 1}</span>
-                      )}
-                    </div>
-
-                    <div className="min-w-0 pr-1">
-                      <div className="mb-1.5 flex min-h-5 items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          {settings.showSpeakers && segment.speaker && (
-                            <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300">
-                              <User size={10} />
-                              {segment.speaker}
-                            </span>
-                          )}
-                          {segment.language && (
-                            <span className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">
-                              {segment.language}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-0.5 opacity-60 transition group-hover:opacity-100">
-                          <button
-                            onClick={() => handleCopySegment(segment.id, segment.text)}
-                            className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-slate-100"
-                            title="Copiar frase"
-                          >
-                            {copiedId === segment.id ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
-                          </button>
-                          <button
-                            onClick={() => handleStartEdit(segment)}
-                            className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-cyan-300"
-                            title="Editar frase"
-                          >
-                            <Edit2 size={13} />
-                          </button>
-                          <button
-                            onClick={() => onDeleteSegment(segment.id)}
-                            className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-rose-400"
-                            title="Eliminar frase"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
-                      </div>
-
-                      {editingId === segment.id ? (
-                        <div className="space-y-2">
-                          <textarea
-                            value={editingText}
-                            onChange={(event) => setEditingText(event.target.value)}
-                            className="w-full resize-y rounded-xl border border-cyan-400 bg-slate-950 p-3 text-sm text-slate-100 focus:outline-none"
-                            rows={2}
-                            autoFocus
-                          />
-                          <div className="flex justify-end gap-2">
-                            <button
-                              onClick={() => setEditingId(null)}
-                              className="rounded-lg px-3 py-1 text-xs text-slate-400 transition hover:bg-white/10 hover:text-white"
-                            >
-                              Cancelar
-                            </button>
-                            <button
-                              onClick={() => handleSaveEdit(segment.id)}
-                              className="rounded-lg bg-cyan-400 px-3.5 py-1 text-xs font-bold text-slate-950 transition hover:bg-cyan-300"
-                            >
-                              Guardar
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        renderSegmentText(segment)
-                      )}
-                    </div>
-                  </article>
-                );
-              })
+                        {index < segments.length - 1 ? " " : ""}
+                      </React.Fragment>
+                    );
+                  })}
+                </p>
+              </div>
             )}
           </div>
 
-          {!isFollowingLive && historySegments.length > 0 && (
+          {!isFollowingLive && segments.length > 0 && (
             <button
               onClick={scrollToLatest}
               className="absolute bottom-4 right-4 flex items-center gap-1.5 rounded-full bg-cyan-500 px-3.5 py-2 text-xs font-bold text-slate-950 shadow-xl shadow-cyan-500/20 transition hover:scale-105 hover:bg-cyan-400 active:scale-95"
             >
               <ArrowDown size={14} />
-              Volver al directo
+              Ver texto más reciente
             </button>
           )}
         </div>
       </div>
+
+      {showDetailedHistory && (
+        <div
+          className="absolute inset-0 z-50 flex flex-col bg-slate-950/98 backdrop-blur-xl"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Historial completo de la transcripción"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 p-4 sm:px-6">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-2 text-cyan-400">
+                <History size={18} />
+              </div>
+              <div>
+                <h3 className="font-bold text-white">Historial completo</h3>
+                <p className="text-xs text-slate-400">Fragmentos, horas y herramientas de revisión</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Buscar en el historial..."
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  className="w-44 rounded-xl border border-white/10 bg-slate-900 py-1.5 pl-8 pr-3 text-xs text-slate-200 placeholder-slate-500 transition focus:border-cyan-400 focus:outline-none sm:w-56"
+                  autoFocus
+                />
+              </div>
+              <button
+                onClick={() => setShowDetailedHistory(false)}
+                className="rounded-xl border border-white/10 bg-white/5 p-2 text-slate-300 transition hover:bg-white/10 hover:text-white"
+                title="Cerrar historial"
+              >
+                <X size={17} />
+              </button>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-4 sm:px-6">
+            {filteredSegments.length === 0 ? (
+              <div className="flex min-h-full items-center justify-center p-6 text-center">
+                <div>
+                  <History size={28} className="mx-auto mb-3 text-slate-600" />
+                  <p className="text-sm font-medium text-slate-400">
+                    {searchQuery ? `No hay resultados para “${searchQuery}”.` : "Todavía no hay contenido transcrito."}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              filteredSegments.map((segment, index) => (
+                <article
+                  key={segment.id}
+                  className="group relative grid grid-cols-[auto_1fr] gap-3 rounded-xl border border-transparent px-3 py-3 transition hover:border-white/10 hover:bg-white/[0.04] sm:gap-4 sm:px-4"
+                >
+                  <div className="w-11 pt-0.5 text-right sm:w-14">
+                    {settings.showTimestamps ? (
+                      <span className="font-mono text-[10px] font-semibold text-cyan-400/70">
+                        {segment.timestamp}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-[10px] text-slate-600">{index + 1}</span>
+                    )}
+                  </div>
+
+                  <div className="min-w-0 pr-1">
+                    <div className="mb-1.5 flex min-h-5 items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {settings.showSpeakers && segment.speaker && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300">
+                            <User size={10} />
+                            {segment.speaker}
+                          </span>
+                        )}
+                        {segment.language && (
+                          <span className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">
+                            {segment.language}
+                          </span>
+                        )}
+                        {segment.isPartial && (
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-300">En vivo</span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-0.5 opacity-60 transition group-hover:opacity-100">
+                        <button
+                          onClick={() => handleCopySegment(segment.id, segment.text)}
+                          className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-slate-100"
+                          title="Copiar frase"
+                        >
+                          {copiedId === segment.id ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                        </button>
+                        <button
+                          onClick={() => handleStartEdit(segment)}
+                          className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-cyan-300"
+                          title="Editar frase"
+                        >
+                          <Edit2 size={13} />
+                        </button>
+                        <button
+                          onClick={() => onDeleteSegment(segment.id)}
+                          className="rounded-lg p-1 text-slate-500 transition hover:bg-white/10 hover:text-rose-400"
+                          title="Eliminar frase"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {editingId === segment.id ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={editingText}
+                          onChange={(event) => setEditingText(event.target.value)}
+                          className="w-full resize-y rounded-xl border border-cyan-400 bg-slate-950 p-3 text-sm text-slate-100 focus:outline-none"
+                          rows={2}
+                          autoFocus
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => setEditingId(null)}
+                            className="rounded-lg px-3 py-1 text-xs text-slate-400 transition hover:bg-white/10 hover:text-white"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            onClick={() => handleSaveEdit(segment.id)}
+                            className="rounded-lg bg-cyan-400 px-3.5 py-1 text-xs font-bold text-slate-950 transition hover:bg-cyan-300"
+                          >
+                            Guardar
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      renderSegmentText(segment)
+                    )}
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
