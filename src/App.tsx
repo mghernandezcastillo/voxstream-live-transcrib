@@ -57,6 +57,11 @@ import {
 
 type LocalEngineStatus = "idle" | "loading" | "ready" | "error";
 type RuntimeEngine = Settings["aiEngine"];
+type CaptureFocusBehavior = "focus-captured-surface" | "no-focus-change";
+type CaptureFocusController = {
+  setFocusBehavior: (behavior: CaptureFocusBehavior) => void;
+};
+type CaptureFocusControllerConstructor = new () => CaptureFocusController;
 
 const MAX_INFERENCE_AUDIO_SEC = 15;
 const MAX_BUFFERED_AUDIO_SEC = 90;
@@ -271,8 +276,27 @@ export default function App() {
     try {
       setTranscriptionState("requesting");
 
-      // Request screen/tab sharing with audio enabled (Chrome defaults audio on for tabs)
-      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      const CaptureControllerApi = (
+        window as typeof window & { CaptureController?: CaptureFocusControllerConstructor }
+      ).CaptureController;
+      let captureController: CaptureFocusController | null = null;
+
+      if (CaptureControllerApi) {
+        try {
+          captureController = new CaptureControllerApi();
+          captureController.setFocusBehavior("no-focus-change");
+        } catch (focusError) {
+          captureController = null;
+          console.warn(
+            "[VoxStream] El navegador no aceptó conservar el foco durante la captura:",
+            focusError,
+          );
+        }
+      }
+
+      // Request screen/tab sharing with audio enabled (Chrome defaults audio on for tabs).
+      // Conditional Focus keeps VoxStream visible while the selected tab is captured.
+      const displayOptions = {
         video: {
           displaySurface: "browser",
         },
@@ -284,7 +308,16 @@ export default function App() {
         } as any,
         systemAudio: "include",
         surfaceSwitching: "include",
-      } as any);
+        selfBrowserSurface: "exclude",
+        ...(captureController ? { controller: captureController } : {}),
+      } as any;
+      const displayStream = await navigator.mediaDevices.getDisplayMedia(displayOptions);
+
+      if (!captureController) {
+        // This may restore a separate app window in older browsers. Browsers can
+        // ignore window.focus(), so Conditional Focus remains the reliable path.
+        window.setTimeout(() => window.focus(), 0);
+      }
 
       const audioTracks = displayStream.getAudioTracks();
 

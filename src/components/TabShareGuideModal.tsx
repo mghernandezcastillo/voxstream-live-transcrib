@@ -55,7 +55,7 @@ export const TabShareGuideModal: React.FC<TabShareGuideModalProps> = ({
                 Selecciona <strong>"Pestaña de Chrome"</strong> (o Tab).
               </p>
               <p className="text-xs text-slate-400 mt-0.5">
-                Elige la pestaña con la clase, examen, reunión o video.
+                Elige la pestaña con la clase, examen, reunión o video. En navegadores compatibles, VoxStream permanecerá visible mientras la captura continúa en segundo plano.
               </p>
             </div>
           </div>
@@ -115,4 +115,3 @@ export const TabShareGuideModal: React.FC<TabShareGuideModalProps> = ({
     </div>
   );
 };
-
