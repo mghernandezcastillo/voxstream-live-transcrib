@@ -63,7 +63,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
             {settings.aiEngine === "moonshine" && (
               <p className="text-[10px] text-emerald-400 mt-1.5 ml-1">
-                Local y sin API key. Inglés usa Tiny Streaming; Whisper se conserva como respaldo.
+                Local y sin API key. Moonshine EN/ES y Whisper quedan preparados al iniciar.
               </p>
             )}
             {settings.aiEngine === "cloud" && (

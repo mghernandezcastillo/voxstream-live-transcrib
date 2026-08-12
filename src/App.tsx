@@ -163,6 +163,7 @@ export default function App() {
 
   const moonshineWorkerRef = useRef<Worker | null>(null);
   const moonshineWorkerReadyRef = useRef(false);
+  const moonshineAllModelsReadyRef = useRef(false);
   const moonshineSessionReadyRef = useRef(false);
   const moonshineSessionStartingRef = useRef(false);
   const moonshineWorkerBusyRef = useRef(false);
@@ -473,33 +474,6 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
   };
 
-  const disposeWhisperWorker = () => {
-    if (localWorkerTimeoutRef.current) clearTimeout(localWorkerTimeoutRef.current);
-    localWorkerTimeoutRef.current = null;
-    localWorkerGenerationRef.current += 1;
-    localWorkerRef.current?.terminate();
-    localWorkerRef.current = null;
-    localWorkerReadyRef.current = false;
-    localWorkerBusyRef.current = false;
-    localWorkerBackendRef.current = null;
-    localActiveChunkRef.current = null;
-    downloadProgressCache.current = {};
-  };
-
-  const disposeMoonshineWorker = () => {
-    moonshineWorkerGenerationRef.current += 1;
-    moonshineWorkerRef.current?.terminate();
-    moonshineWorkerRef.current = null;
-    moonshineWorkerReadyRef.current = false;
-    moonshineSessionReadyRef.current = false;
-    moonshineSessionStartingRef.current = false;
-    moonshineWorkerBusyRef.current = false;
-    moonshineWorkerLanguageRef.current = null;
-    moonshineActiveChunkRef.current = null;
-    setMoonshineModelName(null);
-    setMoonshineStreamLagMs(null);
-  };
-
   const completeStartupPreload = (status: string) => {
     if (startupReadyRef.current) return;
     setDownloadProgress(100);
@@ -597,9 +571,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           moonshineStartupLanguageRef.current = startupLanguage;
           setDownloadProgress(99);
           setDownloadStatus(
-            `3/3 · Inicializando Moonshine ${startupLanguage === "spanish" ? "Español" : "English"} en memoria...`,
+            "3/3 · Inicializando Moonshine Español e English en memoria...",
           );
-          ensureMoonshineWorker(startupLanguage);
+          ensureMoonshineWorker(startupLanguage, true);
           return;
         }
 
@@ -687,9 +661,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
     moonshineStartupWarmupRef.current = false;
     moonshineStartupLanguageRef.current = null;
-    completeStartupPreload(
-      `3/3 · Moonshine ${language === "spanish" ? "Español" : "English"} listo para usar`,
-    );
+    completeStartupPreload("3/3 · Whisper y Moonshine ES/EN listos para usar");
   };
 
   const fallbackMoonshineToWhisper = (reason: string) => {
@@ -704,6 +676,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineWorkerRef.current?.terminate();
     moonshineWorkerRef.current = null;
     moonshineWorkerReadyRef.current = false;
+    moonshineAllModelsReadyRef.current = false;
     moonshineSessionReadyRef.current = false;
     moonshineSessionStartingRef.current = false;
     moonshineWorkerBusyRef.current = false;
@@ -732,19 +705,33 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     drainLocalAudioQueue();
   };
 
-  const ensureMoonshineWorker = (language: OptimizedLanguage) => {
+  const ensureMoonshineWorker = (
+    language: OptimizedLanguage,
+    loadAllModels = false,
+  ) => {
     if (!isMountedRef.current) return;
 
-    if (
-      moonshineWorkerRef.current &&
-      moonshineWorkerLanguageRef.current === language
-    ) {
-      if (moonshineWorkerReadyRef.current) {
+    if (moonshineWorkerRef.current) {
+      if (
+        moonshineWorkerLanguageRef.current === language &&
+        moonshineWorkerReadyRef.current &&
+        (!loadAllModels || moonshineAllModelsReadyRef.current)
+      ) {
         setLocalEngineStatus("ready");
         setLocalEngineBackend("wasm");
         completeMoonshineStartupWarmup(language);
         startMoonshineSessionIfReady();
+        return;
       }
+
+      moonshineWorkerLanguageRef.current = language;
+      moonshineWorkerReadyRef.current = false;
+      moonshineSessionReadyRef.current = false;
+      moonshineSessionStartingRef.current = false;
+      moonshineWorkerRef.current.postMessage({
+        type: loadAllModels ? "load-all" : "load",
+        language,
+      });
       return;
     }
 
@@ -752,6 +739,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     moonshineWorkerRef.current?.terminate();
     moonshineWorkerRef.current = null;
     moonshineWorkerReadyRef.current = false;
+    moonshineAllModelsReadyRef.current = false;
     moonshineSessionReadyRef.current = false;
     moonshineSessionStartingRef.current = false;
     moonshineWorkerBusyRef.current = false;
@@ -763,7 +751,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     ));
     setDownloadStatus(
       moonshineStartupWarmupRef.current
-        ? `3/3 · Inicializando Moonshine ${language === "spanish" ? "Español" : "English"} en memoria...`
+        ? "3/3 · Inicializando Moonshine Español e English en memoria..."
         : `Cargando Moonshine ${language === "spanish" ? "Español" : "English"}...`,
     );
 
@@ -780,9 +768,10 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
         if (data?.type === "load-start") {
           const fromCache = data.source === "cache";
+          const loadingLanguage = data.language === "spanish" ? "Español" : "English";
           setDownloadStatus(
             moonshineStartupWarmupRef.current
-              ? `3/3 · Inicializando Moonshine ${language === "spanish" ? "Español" : "English"} ${fromCache ? "desde caché" : "desde la red"}...`
+              ? `3/3 · Inicializando Moonshine ${loadingLanguage} ${fromCache ? "desde caché" : "desde la red"}...`
               : `${fromCache ? "Cargando Moonshine desde caché" : "Descargando Moonshine"}...`,
           );
           return;
@@ -808,7 +797,11 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         }
 
         if (data?.type === "ready") {
+          const readyLanguage = (data.language || moonshineWorkerLanguageRef.current) as OptimizedLanguage;
+          moonshineWorkerLanguageRef.current = readyLanguage;
           moonshineWorkerReadyRef.current = true;
+          moonshineAllModelsReadyRef.current =
+            moonshineAllModelsReadyRef.current || data.allModelsReady === true;
           setMoonshineModelName(data.model === "tiny-streaming" ? "tiny-streaming" : "base");
           setLocalEngineStatus("ready");
           setLocalEngineBackend("wasm");
@@ -817,7 +810,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
           console.log(
             `[VoxStream] Moonshine ${String(data.language)} listo (${String(data.model)}).`,
           );
-          completeMoonshineStartupWarmup(language);
+          if (moonshineAllModelsReadyRef.current) {
+            completeMoonshineStartupWarmup(readyLanguage);
+          }
           startMoonshineSessionIfReady();
           return;
         }
@@ -886,7 +881,10 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         fallbackMoonshineToWhisper("el navegador no pudo leer un mensaje del worker");
       };
 
-      worker.postMessage({ type: "load", language });
+      worker.postMessage({
+        type: loadAllModels ? "load-all" : "load",
+        language,
+      });
     } catch (error) {
       fallbackMoonshineToWhisper(error instanceof Error ? error.message : String(error));
     }
@@ -959,10 +957,6 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
         console.log(
           `[VoxStream Auto] Idioma ${detection.language}; confianza heurística ${(detection.confidence * 100).toFixed(0)}%.`,
         );
-        // Keeping both model families resident doubles memory use and hurts the
-        // exact low-end PCs this mode is meant to support. The browser cache is
-        // preserved, so Whisper can still be restored if Moonshine fails.
-        disposeWhisperWorker();
         ensureMoonshineWorker(detection.language);
       })
       .catch((error) => {
@@ -1404,25 +1398,23 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
 
   useEffect(() => {
     if (settings.aiEngine === "local") {
-      disposeMoonshineWorker();
       ensureLocalTranscriptionWorker();
       return;
     }
 
     if (settings.aiEngine === "moonshine" && settings.inputLanguage === "auto") {
-      disposeMoonshineWorker();
       ensureLocalTranscriptionWorker();
+      if (startupReadyRef.current) {
+        ensureMoonshineWorker(getPreferredMoonshineLanguage("auto"));
+      }
       return;
     }
 
     if (settings.aiEngine === "moonshine") {
-      disposeWhisperWorker();
       ensureMoonshineWorker(settings.inputLanguage);
       return;
     }
 
-    disposeWhisperWorker();
-    disposeMoonshineWorker();
     setLocalEngineStatus("idle");
     setLocalEngineBackend(null);
     setDownloadStatus("");

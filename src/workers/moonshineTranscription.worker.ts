@@ -15,6 +15,7 @@ import { isMoonshineManifestCached } from "../utils/moonshineCache";
 type MoonshineLanguage = "english" | "spanish";
 
 let transcriber: MoonshineTranscriber | null = null;
+const transcribers = new Map<MoonshineLanguage, MoonshineTranscriber>();
 let stream: Stream | null = null;
 let loadedLanguage: MoonshineLanguage | null = null;
 let loadedModelName: "tiny-streaming" | "base" | null = null;
@@ -98,18 +99,11 @@ function startSession(sessionId: number) {
   post("session-ready", { sessionId });
 }
 
-async function load(language: MoonshineLanguage) {
-  if (transcriber && loadedLanguage === language) {
-    post("ready", { model: loadedModelName });
-    return;
-  }
+async function loadModel(language: MoonshineLanguage) {
+  const cachedTranscriber = transcribers.get(language);
+  if (cachedTranscriber) return cachedTranscriber;
 
-  closeStream();
-  transcriber?.close();
-  transcriber = null;
-  loadedLanguage = language;
   const modelProfile = getMoonshineModelProfile(language);
-  loadedModelName = modelProfile.model;
 
   const { ModelArch, Transcriber, loadMoonshineModule } = await getMoonshineModule();
 
@@ -120,9 +114,9 @@ async function load(language: MoonshineLanguage) {
   const module = await loadMoonshineModule();
   const manifest = module.sttDependencies(languageCode, String(modelArch), false);
   const source = await isMoonshineManifestCached(manifest) ? "cache" : "network";
-  post("load-start", { source, model: loadedModelName });
+  post("load-start", { language, source, model: modelProfile.model });
 
-  const loadModel = (arch: Parameters<typeof Transcriber.load>[0]["modelArch"]) => Transcriber.load({
+  const createTranscriber = (arch: Parameters<typeof Transcriber.load>[0]["modelArch"]) => Transcriber.load({
     language: languageCode,
     modelArch: arch,
     module,
@@ -133,20 +127,62 @@ async function load(language: MoonshineLanguage) {
       return_audio_data: "false",
     },
     onProgress: (loaded, total, file) => {
-      post("progress", { loaded, total, file, source });
+      post("progress", { language, loaded, total, file, source });
     },
   });
 
-  transcriber = await loadModel(modelArch);
+  const loadedTranscriber = await createTranscriber(modelArch);
+  transcribers.set(language, loadedTranscriber);
+  post("model-ready", { language, model: modelProfile.model });
+  return loadedTranscriber;
+}
 
-  post("ready", { model: loadedModelName });
+async function selectLanguage(language: MoonshineLanguage) {
+  if (transcriber && loadedLanguage === language) {
+    post("ready", {
+      model: loadedModelName,
+      allModelsReady: transcribers.size === 2,
+    });
+    return;
+  }
+
+  closeStream();
+  transcriber = await loadModel(language);
+  loadedLanguage = language;
+  loadedModelName = getMoonshineModelProfile(language).model;
+
+  post("ready", {
+    model: loadedModelName,
+    allModelsReady: transcribers.size === 2,
+  });
+}
+
+async function loadAll(preferredLanguage: MoonshineLanguage) {
+  const otherLanguage: MoonshineLanguage = preferredLanguage === "english" ? "spanish" : "english";
+  await loadModel(preferredLanguage);
+  await loadModel(otherLanguage);
+
+  closeStream();
+  transcriber = transcribers.get(preferredLanguage) || null;
+  loadedLanguage = preferredLanguage;
+  loadedModelName = getMoonshineModelProfile(preferredLanguage).model;
+  post("ready", {
+    model: loadedModelName,
+    allModelsReady: true,
+    models: ["english", "spanish"],
+  });
 }
 
 async function handleMessage(event: MessageEvent) {
   const { type, language, sessionId, audio, sampleRate } = event.data || {};
 
   if (type === "load") {
-    await load(language as MoonshineLanguage);
+    await selectLanguage(language as MoonshineLanguage);
+    return;
+  }
+
+  if (type === "load-all") {
+    await loadAll(language as MoonshineLanguage);
     return;
   }
 
@@ -191,7 +227,8 @@ async function handleMessage(event: MessageEvent) {
 
   if (type === "dispose") {
     closeStream();
-    transcriber?.close();
+    for (const loadedTranscriber of transcribers.values()) loadedTranscriber.close();
+    transcribers.clear();
     transcriber = null;
     loadedLanguage = null;
     loadedModelName = null;
