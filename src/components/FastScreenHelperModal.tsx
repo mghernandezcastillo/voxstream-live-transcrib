@@ -13,6 +13,12 @@ import {
   Send,
   Eye,
 } from "lucide-react";
+import { readApiJson } from "../utils/apiResponse";
+
+interface FastVisionResponse {
+  answer?: string;
+  error?: string;
+}
 
 interface FastScreenHelperModalProps {
   isOpen: boolean;
@@ -107,7 +113,7 @@ export const FastScreenHelperModal: React.FC<FastScreenHelperModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await readApiJson<FastVisionResponse>(res);
       if (res.ok) {
         setAnswer(data.answer || "No se obtuvo respuesta.");
       } else {

@@ -32,6 +32,40 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 const getGeminiApiKey = () =>
   process.env.GOOGLE_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || "";
 
+const getGeminiHttpError = (error: any) => {
+  const providerMessage = String(error?.message || error || "");
+
+  if (!getGeminiApiKey() || /environment variable is missing/i.test(providerMessage)) {
+    return {
+      status: 503,
+      code: "GEMINI_API_KEY_MISSING",
+      error: "Gemini no está configurado. Falta GEMINI_API_KEY o GOOGLE_API_KEY en el servidor.",
+    };
+  }
+
+  if (/429|resource_exhausted|quota/i.test(providerMessage)) {
+    return {
+      status: 429,
+      code: "GEMINI_QUOTA_EXCEEDED",
+      error: "Gemini alcanzó el límite de cuota. Inténtalo de nuevo más tarde.",
+    };
+  }
+
+  if (/api key not valid|api_key_invalid|permission_denied|\b401\b|\b403\b/i.test(providerMessage)) {
+    return {
+      status: 502,
+      code: "GEMINI_AUTH_ERROR",
+      error: "La API key de Gemini no es válida o no tiene permisos para usar el modelo.",
+    };
+  }
+
+  return {
+    status: 502,
+    code: "GEMINI_PROVIDER_ERROR",
+    error: "Gemini no pudo procesar la solicitud en este momento.",
+  };
+};
+
 // Load the Gemini SDK only when an AI route is used. This keeps health checks and
 // the Vercel function bootstrap independent from the provider SDK.
 const getGenAI = async () => {
@@ -375,7 +409,8 @@ ${question}
     return res.json({ answer: response.text?.trim() || "No pude generar una respuesta." });
   } catch (error: any) {
     console.error("[SERVER /api/chat-transcript ERROR]", error?.message || error);
-    return res.json({ answer: "Ocurrió un inconveniente al procesar la pregunta. Inténtalo de nuevo." });
+    const apiError = getGeminiHttpError(error);
+    return res.status(apiError.status).json(apiError);
   }
 });
 
@@ -438,8 +473,16 @@ Responde de forma clara, directa y concisa a la consulta del usuario basándote 
     });
   } catch (error: any) {
     console.error("[SERVER /api/fast-vision-query ERROR]", error?.message || error);
-    return res.json({ answer: "No se pudo analizar la imagen de pantalla en este momento." });
+    const apiError = getGeminiHttpError(error);
+    return res.status(apiError.status).json(apiError);
   }
+});
+
+app.use("/api", (req, res) => {
+  return res.status(404).json({
+    error: `Ruta de API no encontrada: ${req.method} ${req.path}`,
+    code: "API_ROUTE_NOT_FOUND",
+  });
 });
 
 export default app;

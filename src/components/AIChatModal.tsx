@@ -14,6 +14,12 @@ import {
   FileQuestion,
   Trash2,
 } from "lucide-react";
+import { readApiJson } from "../utils/apiResponse";
+
+interface ChatApiResponse {
+  answer?: string;
+  error?: string;
+}
 
 interface AIChatModalProps {
   isOpen: boolean;
@@ -128,7 +134,11 @@ export const AIChatModal: React.FC<AIChatModalProps> = ({
         }),
       });
 
-      const data = await res.json().catch(() => ({ answer: "No se pudo obtener una respuesta válida del servidor." }));
+      const data = await readApiJson<ChatApiResponse>(res);
+
+      if (!res.ok) {
+        throw new Error(data.error || `No se pudo completar la consulta (HTTP ${res.status}).`);
+      }
 
       const botMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -138,14 +148,14 @@ export const AIChatModal: React.FC<AIChatModalProps> = ({
       };
 
       setMessages((prev) => [...prev, botMsg]);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error asking question:", err);
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: "Ocurrió un error al consultar con Gemini.",
+          content: `Error al consultar con Gemini: ${err?.message || "Inténtalo de nuevo."}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         },
       ]);
@@ -331,4 +341,3 @@ export const AIChatModal: React.FC<AIChatModalProps> = ({
     </div>
   );
 };
-
