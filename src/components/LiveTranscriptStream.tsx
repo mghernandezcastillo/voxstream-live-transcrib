@@ -15,6 +15,8 @@ import {
   Edit2,
   History,
   Languages,
+  Pause,
+  Play,
   Radio,
   Search,
   Sparkles,
@@ -30,7 +32,9 @@ interface LiveTranscriptStreamProps {
   onUpdateSegment: (id: string, newText: string) => void;
   onDeleteSegment: (id: string) => void;
   onClearAll: () => void;
+  onTogglePause: () => void;
   isRecording: boolean;
+  isPaused: boolean;
   isProcessingChunk: boolean;
   latencyMs?: number | null;
 }
@@ -41,7 +45,9 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
   onUpdateSegment,
   onDeleteSegment,
   onClearAll,
+  onTogglePause,
   isRecording,
+  isPaused,
   isProcessingChunk,
   latencyMs,
 }) => {
@@ -286,6 +292,23 @@ export const LiveTranscriptStream: React.FC<LiveTranscriptStreamProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {(isRecording || isPaused) && (
+            <button
+              type="button"
+              onClick={onTogglePause}
+              className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition ${
+                isPaused
+                  ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300 hover:bg-emerald-400/20"
+                  : "border-amber-400/25 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20"
+              }`}
+              title={isPaused ? "Reanudar transcripción" : "Pausar transcripción"}
+              aria-label={isPaused ? "Reanudar transcripción" : "Pausar transcripción"}
+            >
+              {isPaused ? <Play size={13} fill="currentColor" /> : <Pause size={13} fill="currentColor" />}
+              <span>{isPaused ? "Reanudar" : "Pausar"}</span>
+            </button>
+          )}
+
           <button
             onClick={() => setShowDetailedHistory(true)}
             className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-400/30 hover:bg-white/10"

@@ -2298,7 +2298,9 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               onUpdateSegment={handleUpdateSegment}
               onDeleteSegment={handleDeleteSegment}
               onClearAll={handleClearAll}
+              onTogglePause={togglePause}
               isRecording={transcriptionState === "recording"}
+              isPaused={transcriptionState === "paused"}
               isProcessingChunk={isProcessingChunk}
               latencyMs={
                 runtimeEngine === "moonshine"
