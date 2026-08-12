@@ -51,6 +51,8 @@ import {
   Tv,
   Zap,
   Languages,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 
 type LocalEngineStatus = "idle" | "loading" | "ready" | "error";
@@ -122,6 +124,7 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showFastHelperModal, setShowFastHelperModal] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Settings
   const [settings, setSettings] = useState<Settings>({
@@ -233,6 +236,13 @@ export default function App() {
   useEffect(() => {
     segmentsRef.current = segments;
   }, [segments]);
+
+  useEffect(() => {
+    const syncFullscreenState = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    syncFullscreenState();
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -1933,6 +1943,26 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
     }
   };
 
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      if (!document.fullscreenEnabled) {
+        setErrorMessage("⚠️ Este navegador no permite usar la aplicación en pantalla completa.");
+        return;
+      }
+
+      await document.documentElement.requestFullscreen();
+    } catch (error) {
+      setErrorMessage(
+        `⚠️ No se pudo cambiar a pantalla completa: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950 antialiased relative overflow-x-hidden">
       {/* Loading Overlay */}
@@ -2065,6 +2095,18 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       <div className="fixed top-[-10%] left-[-10%] w-[45%] h-[45%] bg-indigo-600/25 rounded-full blur-[130px] pointer-events-none" />
       <div className="fixed bottom-[-5%] right-[-5%] w-[50%] h-[50%] bg-fuchsia-600/15 rounded-full blur-[140px] pointer-events-none" />
       <div className="fixed top-1/3 right-1/4 w-[35%] h-[35%] bg-cyan-500/15 rounded-full blur-[110px] pointer-events-none" />
+
+      {startupReady && (
+        <button
+          onClick={toggleFullscreen}
+          className="fixed right-4 top-20 z-40 flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-400/30 bg-slate-950/80 text-cyan-300 shadow-xl shadow-cyan-500/10 backdrop-blur-xl transition hover:scale-105 hover:border-cyan-400/60 hover:bg-slate-900 hover:text-cyan-200 active:scale-95"
+          title={isFullscreen ? "Salir de pantalla completa" : "Ver aplicación en pantalla completa"}
+          aria-label={isFullscreen ? "Salir de pantalla completa" : "Ver aplicación en pantalla completa"}
+          aria-pressed={isFullscreen}
+        >
+          {isFullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
+        </button>
+      )}
 
       {/* Top Header Bar */}
       <header className="sticky top-0 z-30 bg-white/5 backdrop-blur-xl border-b border-white/10 px-4 lg:px-8 py-3.5 flex items-center justify-between">
