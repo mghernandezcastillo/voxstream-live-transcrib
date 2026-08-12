@@ -2337,6 +2337,13 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
               onClearAll={handleClearAll}
               isRecording={transcriptionState === "recording"}
               isProcessingChunk={isProcessingChunk}
+              latencyMs={
+                runtimeEngine === "moonshine"
+                  ? moonshineStreamLagMs
+                  : runtimeEngine === "local"
+                    ? lastInferenceLatencyMs
+                    : null
+              }
             />
           </div>
 
