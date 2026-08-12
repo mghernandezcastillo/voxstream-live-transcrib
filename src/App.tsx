@@ -135,7 +135,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>({
     aiEngine: "moonshine",
     chunkDurationSec: 2.0,
-    inputLanguage: "auto",
+    inputLanguage: "english",
     autoTranslate: false,
     targetLanguage: "Español",
     autoScroll: true,
@@ -195,7 +195,7 @@ export default function App() {
   const autoLanguageProbeRunningRef = useRef(false);
   const detectedLanguageRef = useRef<OptimizedLanguage | null>(null);
   const activeRuntimeEngineRef = useRef<RuntimeEngine>("moonshine");
-  const activeInputLanguageRef = useRef<Settings["inputLanguage"]>("auto");
+  const activeInputLanguageRef = useRef<Settings["inputLanguage"]>("english");
 
   const localActiveChunkRef = useRef<LocalAudioChunk | null>(null);
   const localSessionIdRef = useRef(0);
@@ -2169,18 +2169,20 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'english' }))}
               disabled={transcriptionState !== "idle"}
-              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all disabled:opacity-40 ${settings.inputLanguage === 'english' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all inline-flex items-center gap-1.5 disabled:opacity-40 ${settings.inputLanguage === 'english' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
               title="Inglés Fijo (Optimizado)"
             >
-              EN
+              <span aria-hidden="true">🇺🇸</span>
+              <span>EN</span>
             </button>
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'spanish' }))}
               disabled={transcriptionState !== "idle"}
-              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all disabled:opacity-40 ${settings.inputLanguage === 'spanish' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+              className={`px-3 py-1 text-xs font-bold rounded-lg transition-all inline-flex items-center gap-1.5 disabled:opacity-40 ${settings.inputLanguage === 'spanish' ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
               title="Español Fijo (Optimizado)"
             >
-              ES
+              <span aria-hidden="true">🇪🇸</span>
+              <span>ES</span>
             </button>
             <button
               onClick={() => setSettings(s => ({ ...s, inputLanguage: 'auto' }))}
