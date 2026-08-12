@@ -1,5 +1,12 @@
 import { BrainCircuit, Check, Cpu, Languages, Sparkles } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { useEffect } from "react";
+import {
+  motion,
+  useMotionValue,
+  useReducedMotion,
+  useSpring,
+  useTransform,
+} from "motion/react";
 
 type AIStartupLoaderProps = {
   progress: number;
@@ -17,6 +24,17 @@ export function AIStartupLoader({ progress, status }: AIStartupLoaderProps) {
   const reduceMotion = useReducedMotion();
   const normalizedProgress = Math.min(100, Math.max(0, Math.round(progress)));
   const isReady = normalizedProgress >= 100;
+  const progressValue = useMotionValue(0);
+  const smoothProgress = useSpring(progressValue, {
+    stiffness: 150,
+    damping: 24,
+    mass: 0.5,
+  });
+  const displayedProgress = useTransform(smoothProgress, (value) => Math.round(value));
+
+  useEffect(() => {
+    progressValue.set(normalizedProgress);
+  }, [normalizedProgress, progressValue]);
 
   return (
     <motion.div
@@ -153,7 +171,8 @@ export function AIStartupLoader({ progress, status }: AIStartupLoaderProps) {
                 )}
               </motion.div>
               <span className={`mt-2 text-3xl font-semibold tracking-[-0.06em] ${isReady ? "text-emerald-200" : "text-white"}`}>
-                {normalizedProgress}<span className="ml-1 text-sm font-medium tracking-normal text-slate-400">%</span>
+                <motion.span>{reduceMotion ? normalizedProgress : displayedProgress}</motion.span>
+                <span className="ml-1 text-sm font-medium tracking-normal text-slate-400">%</span>
               </span>
             </div>
           </div>

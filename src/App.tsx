@@ -1462,6 +1462,13 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
   };
 
   useEffect(() => {
+    // The startup overlay represents the preparation of every local engine,
+    // regardless of which language or engine is selected as the default.
+    if (!startupReadyRef.current) {
+      ensureLocalTranscriptionWorker();
+      return;
+    }
+
     if (settings.aiEngine === "local") {
       ensureLocalTranscriptionWorker();
       return;
