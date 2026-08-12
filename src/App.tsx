@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { AnimatePresence } from "motion/react";
 import {
   TranscriptSegment,
   TranscriptionState,
@@ -35,13 +35,13 @@ import { AIChatModal } from "./components/AIChatModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { ExportModal } from "./components/ExportModal";
 import { FastScreenHelperModal } from "./components/FastScreenHelperModal";
+import { AIStartupLoader } from "./components/AIStartupLoader";
 import {
   Monitor,
   Mic,
   Pause,
   Play,
   Square,
-  Sparkles,
   MessageSquare,
   Download,
   Settings as SettingsIcon,
@@ -2001,126 +2001,7 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
       {/* Loading Overlay */}
       <AnimatePresence>
         {!startupReady && (
-          <motion.div 
-            initial={{ opacity: 1, backdropFilter: "blur(0px)" }}
-            exit={{ opacity: 0, scale: 1.1, backdropFilter: "blur(10px)" }}
-            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-            className="fixed inset-0 z-[100] bg-[#020617] flex flex-col items-center justify-center overflow-hidden"
-          >
-            <div className="fixed top-[-10%] left-[-10%] w-[45%] h-[45%] bg-indigo-600/30 rounded-full blur-[130px] pointer-events-none" />
-            <div className="fixed bottom-[-5%] right-[-5%] w-[50%] h-[50%] bg-fuchsia-600/20 rounded-full blur-[140px] pointer-events-none" />
-
-            <div className="relative z-10 flex flex-col items-center justify-center space-y-10">
-              <div className="relative w-56 h-56 flex items-center justify-center">
-                <motion.div 
-                  animate={{ 
-                    rotate: 360, 
-                    borderColor: downloadProgress === 100 ? "rgba(16, 185, 129, 0.5)" : "rgba(34, 211, 238, 0.5)" 
-                  }}
-                  transition={{ rotate: { duration: 4, repeat: Infinity, ease: "linear" }, borderColor: { duration: 0.5 } }}
-                  className="absolute inset-0 rounded-full border-2 border-transparent border-t-current border-r-current shadow-[0_0_20px_rgba(34,211,238,0.1)]" 
-                />
-                
-                <motion.div 
-                  animate={{ 
-                    rotate: -360,
-                    scale: downloadProgress === 100 ? [1, 1.05, 1] : 1,
-                    borderColor: downloadProgress === 100 ? "rgba(52, 211, 153, 0.8)" : "rgba(99, 102, 241, 0.8)"
-                  }}
-                  transition={{ rotate: { duration: 3, repeat: Infinity, ease: "linear" }, scale: { duration: 1.5, repeat: Infinity, ease: "easeInOut" } }}
-                  className="absolute inset-3 rounded-full border border-transparent border-b-current border-l-current shadow-[0_0_25px_rgba(99,102,241,0.2)]" 
-                />
-                
-                <motion.div 
-                  animate={{ 
-                    rotate: 360, 
-                    borderColor: downloadProgress === 100 ? "rgba(167, 243, 208, 0.6)" : "rgba(232, 121, 249, 0.8)" 
-                  }}
-                  transition={{ rotate: { duration: 2, repeat: Infinity, ease: "linear" } }}
-                  className="absolute inset-8 rounded-full border border-transparent border-t-current" 
-                />
-                
-                <motion.div 
-                  animate={{ 
-                    boxShadow: downloadProgress === 100 ? "0 0 40px rgba(16, 185, 129, 0.3)" : "0 0 0px rgba(0,0,0,0)",
-                  }}
-                  className="absolute inset-0 flex flex-col items-center justify-center bg-[#020617]/40 backdrop-blur-md rounded-full border border-white/5"
-                >
-                  <AnimatePresence mode="wait">
-                    {downloadProgress === 100 ? (
-                      <motion.div
-                        key="ready"
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        className="flex flex-col items-center"
-                      >
-                        <Sparkles size={28} className="text-emerald-400 mb-1 animate-pulse" />
-                        <span className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-br from-emerald-300 to-teal-500 tracking-tighter">
-                          Ready
-                        </span>
-                      </motion.div>
-                    ) : (
-                      <motion.div
-                        key="loading"
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.8 }}
-                        className="flex flex-col items-center"
-                      >
-                        <Zap size={24} className="text-cyan-400 mb-1" />
-                        <span className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-br from-cyan-300 to-indigo-400 tracking-tighter">
-                          {downloadProgress}%
-                        </span>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
-              </div>
-
-              <div className="flex flex-col items-center space-y-3 text-center max-w-sm">
-                <AnimatePresence mode="wait">
-                  <motion.h2 
-                    key={downloadProgress === 100 ? "done" : "init"}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="text-2xl font-bold text-white tracking-tight"
-                  >
-                    {downloadProgress === 100 ? "Sistema Preparado" : "Inicializando Motor IA"}
-                  </motion.h2>
-                </AnimatePresence>
-                
-                <motion.div 
-                  animate={{ 
-                    backgroundColor: downloadProgress === 100 ? "rgba(16, 185, 129, 0.1)" : "rgba(34, 211, 238, 0.1)",
-                    borderColor: downloadProgress === 100 ? "rgba(16, 185, 129, 0.2)" : "rgba(34, 211, 238, 0.2)",
-                    color: downloadProgress === 100 ? "rgb(52, 211, 153)" : "rgb(34, 211, 238)"
-                  }}
-                  className="text-sm font-mono px-4 py-1.5 rounded-full border"
-                >
-                  {downloadStatus || (downloadProgress === 100 ? "Sistema preparado" : "Preparando modelos...")}
-                </motion.div>
-
-                <div
-                  className="w-72 sm:w-96 h-2 overflow-hidden rounded-full border border-white/10 bg-slate-950/80 shadow-inner"
-                  role="progressbar"
-                  aria-label="Progreso de preparación de los motores locales"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={downloadProgress}
-                >
-                  <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 shadow-[0_0_16px_rgba(34,211,238,0.55)]"
-                    animate={{ width: `${downloadProgress}%` }}
-                    transition={{ duration: 0.25, ease: "easeOut" }}
-                  />
-                </div>
-                
-                <p className="text-xs text-slate-400 mt-4 leading-relaxed px-4">
-                  VoxStream prepara Whisper y Moonshine en inglés y español una sola vez, y conserva sus modelos en la caché del navegador.
-                </p>
-              </div>
-            </div>
-          </motion.div>
+          <AIStartupLoader progress={downloadProgress} status={downloadStatus} />
         )}
       </AnimatePresence>
 
